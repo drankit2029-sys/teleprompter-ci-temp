@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- API calls that are unavailable on minSdk 26. Android Lint's NewApi
+         check is the API-level compatibility checker; run `./gradlew lintDebug`
+         or `scripts/check.sh` to see errors and quick-fix suggestions. -->
+    <issue id="NewApi" severity="error" />
+    <issue id="InlinedApi" severity="warning" />
+    <issue id="OldTargetApi" severity="warning" />
+</lint>
