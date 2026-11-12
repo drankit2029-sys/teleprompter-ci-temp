@@ -26,6 +26,8 @@ Full plan: `plan.md`.
 
 **Phase 0 — technical spike: complete. Checkpoint `checkpoint/phase-0` created.**
 **Phase 1 — library, editor, import, export: complete. Checkpoint `checkpoint/phase-1` created.**
+**Phase 2 — prompter core: implemented; core acceptance passed, final overlay
+acceptance and checkpoint pending.**
 
 Phase 0 acceptance completed on the physical target:
 
@@ -76,10 +78,42 @@ display):
   correctly.
 - `scripts/check.sh` and `scripts/check.sh --full-lint` pass on the phone.
 
+Phase 2 implementation and core acceptance (routine UI on a scrcpy virtual
+display; final transparent-overlay pass still needs the main display):
+
+- Per-script stage settings are stored in each `.tpscript` `stage` object and
+  restored with the script; reading defaults remain in DataStore.
+- Stage panel is split into Playback, Text, Look, and Window tabs. Panel height
+  is capped at 46% of portrait height and 66% of landscape height so the focus
+  line remains visible.
+- Verified speed presets/slider, ±5s seek, restart, progress scrubbing, manual
+  drag while paused, countdown Off/3s/5s with cancel, loop-at-end auto replay,
+  end-of-script Replay/Exit, and reading-progress restoration.
+- Verified text size, line spacing, side margins, sans/serif/mono,
+  regular/medium/bold, center/left, five text colors, five background presets,
+  focus-line position, edge fade, horizontal/vertical mirrors, and adaptive
+  contrast while retaining manual colors as fallback.
+- Lock hides chrome, blocks stage touches, keeps hardware controls active, and
+  unlocks via long-press badge or `L`.
+- Hardware controls verified: space/Enter play-pause, arrows seek, volume keys
+  adjust speed, Page Up/Down change text size, `R` restart, `M` mirror, `L`
+  lock, and media play/pause. A platform `MediaSession` exposes play/pause,
+  stop, seek, fast-forward, and rewind.
+- Keep-awake toggle verified by checking the window's `FLAG_KEEP_SCREEN_ON`
+  bit appears and disappears.
+- PiP entry and script rendering verified with the final styling; PiP system
+  actions and compact stage render correctly. Expanding PiP via the system
+  fullscreen button did not work on the scrcpy virtual display; retest on the
+  main display during final acceptance.
+- `scripts/check.sh --full-lint` passes after suppressing the
+  `ComponentActivity.dispatchKeyEvent` restricted-API lint false positive.
+
 
 ## Environment / test device
 
-- Last known build/install target: `10.94.150.40:5555` over Wi-Fi.
+- Last known build/install target: `10.187.152.9:45125` over Wi-Fi.
+  The Wi-Fi address/port changes across networks; check `adb devices` and
+  `adb connect <phone-ip>:<port>` before running build or check commands.
 - USB serial: `RZCY61Z8TPD` (use USB when available; it has lower latency).
 - Device: Samsung SM-M366B
 - Android 17 / API 37
@@ -94,8 +128,8 @@ display):
 - For Wi-Fi ADB, SSH to Termux goes through an adb forward:
 
   ```bash
-  adb -s 10.94.150.40:5555 forward tcp:8022 tcp:8022
-  TERMUX_HOST=127.0.0.1 ./scripts/build-on-phone.sh
+  adb -s "$PHONE_SERIAL" forward tcp:8022 tcp:8022
+  TERMUX_HOST=127.0.0.1 ./scripts/build-on-phone.sh -d "$PHONE_SERIAL"
   TERMUX_HOST=127.0.0.1 ./scripts/check.sh
   ```
 
@@ -181,6 +215,32 @@ display):
     routes `library`, `editor/{scriptId}`, `settings`, and `stage`, and handles
     incoming share/open intents plus lifecycle progress persistence. The
     repositories live in `TeleprompterApp`, so every screen sees the same state.
+21. **Stage settings are per script.** Speed, text size, focus/edge fade,
+    margins, spacing, font, weight, alignment, colors, mirrors, countdown, loop,
+    and keep-awake live in the optional `stage` object of each `.tpscript`.
+    DataStore holds only the defaults for new scripts. This keeps a script's
+    look and presentation behavior together and makes backup/restore complete.
+22. **One playback state for every surface.** `PrompterSession` remains the
+    single source for fullscreen, PiP, and overlay scrolling, countdown, lock,
+    mirror, colors, and progress. `StageScreen` and the overlay only render and
+    issue commands; this prevents the modes from drifting apart.
+23. **Countdown semantics.** A countdown runs only when playback starts from the
+    top or after reaching the end. Resuming mid-script starts immediately.
+    Cancelling the countdown leaves the script paused at the top. Loop mode
+    replays from the top automatically without a countdown.
+24. **Lock protects the performance surface.** Locking hides chrome and ignores
+    stage touch input, but hardware keys, volume keys, media buttons, and the
+    MediaSession stay active. Long-pressing the lock badge or pressing `L`
+    unlocks.
+25. **Hardware mapping is global on the stage.** `MainActivity` intercepts keys
+    before Compose focus handling: space/Enter toggles play, arrows/seek media
+    keys seek, volume keys adjust speed, Page Up/Down change text size, `R`
+    restarts, `M` mirrors, `L` locks, and media stop pauses. A platform
+    `MediaSession` mirrors the same state to headset and system controls.
+26. **Stage panel layout.** Playback/Text/Look/Window tabs keep controls
+    discoverable without hiding the script. The panel is capped at 46% of
+    portrait height and 66% of landscape height so the focus line stays visible;
+    speed controls live on the Playback tab and cues are deferred.
 
 ## Phase 0 implementation map
 
@@ -223,6 +283,26 @@ display):
 - `prompter/PrompterSession.kt` — loads scripts, applies persisted settings,
   saves and restores reading progress.
 
+## Phase 2 implementation map
+
+- `data/StageSettings.kt` — per-script stage model, sanitized bounds, font/
+  weight/alignment enums, and text/background ARGB maps.
+- `data/Script.kt` — optional `stage` settings carried with each script.
+- `data/ScriptRepository.kt` — `stage` JSON serialization inside `.tpscript`
+  and `updateStageSettings` persistence.
+- `prompter/PrompterSession.kt` — countdown, loop, lock, keep-awake, seek,
+  manual scroll, speed/font nudges, mirror, and per-script persistence hooks.
+- `prompter/PrompterStage.kt` — font family/weight, alignment, margins, line
+  spacing, colors, background presets, mirror transforms, and focus mask.
+- `ui/StageScreen.kt` — full stage chrome, Playback/Text/Look/Window panel,
+  progress scrubber, transport, countdown/end overlays, lock badge, and
+  appearance controls; replaces `Phase0StageScreen.kt`.
+- `MainActivity.kt` — stage-settings load/save, keep-awake window flag,
+  hardware-key handling, MediaSession, and PiP/stage wiring.
+- `overlay/PrompterOverlayView.kt` — overlay rendering updated for the same
+  fonts, weights, colors, margins, spacing, alignment, and mirrors.
+- `scripts/check.sh --full-lint` — passes on the phone after the final changes.
+
 ## Permission / manifest notes
 
 - `SYSTEM_ALERT_WINDOW`
@@ -250,19 +330,19 @@ build-on-phone --display-size 1280x720/320
 # window/overlay testing on main display:
 build-on-phone --no-scrcpy
 # or mirror main display:
-scrcpy -s 10.232.147.72:5555 --no-audio
+scrcpy -s "$PHONE_SERIAL" --no-audio
 ```
 
 Useful UI/test commands:
 
 ```bash
-adb -s 10.232.147.72:5555 shell am start -n \
+adb -s "$PHONE_SERIAL" shell am start -n \
   com.accessoryTools.teleprompter/.MainActivity --ez open_prompter true
-adb -s 10.232.147.72:5555 shell appops set \
+adb -s "$PHONE_SERIAL" shell appops set \
   com.accessoryTools.teleprompter SYSTEM_ALERT_WINDOW allow
-adb -s 10.232.147.72:5555 exec-out screencap -p > /tmp/opencode/teleprompter.png
+adb -s "$PHONE_SERIAL" exec-out screencap -p > /tmp/opencode/teleprompter.png
 # debug-only PiP resize test:
-adb -s 10.232.147.72:5555 shell am broadcast \
+adb -s "$PHONE_SERIAL" shell am broadcast \
   -a com.accessoryTools.teleprompter.debug.CYCLE_PIP_SIZE \
   -n com.accessoryTools.teleprompter/.debug.PipDebugReceiver
 ```
@@ -353,4 +433,16 @@ git switch -c recover-phase-0 checkpoint/phase-0
   restore merge, Present/stage, progress resume, and PiP all verified. Fixed
   delete not republishing the library and restore duplicating identical scripts.
   `check.sh` and `--full-lint` pass. Created `checkpoint/phase-1`.
+- 2026-11-12 — Phase 2 implemented: per-script `stage` settings, shared
+  countdown/loop/lock/seek/speed state, Playback/Text/Look/Window stage panel,
+  appearance rendering in stage and overlay, keep-awake, hardware keys, and
+  MediaSession. End/replay, lock, loop, countdown, seek, manual scroll, mirrors,
+  font/color presets, and restart persistence verified on a scrcpy display.
+- 2026-11-12 — Phase 2 final checks: `scripts/check.sh --full-lint` passes after
+  suppressing the `dispatchKeyEvent` restricted-API false positive. Final build
+  installed and launched. Demo script reset to defaults: 140 WPM, 0:00, 46 sp,
+  3s countdown, loop off, keep-awake on, warm/black, sans/medium/center, mirrors
+  off. PiP system fullscreen expand works poorly on the virtual display; retest
+  on the main display. Transparent overlay/adaptive contrast final acceptance
+  and `checkpoint/phase-2` remain.
 

@@ -152,6 +152,21 @@ class ScriptRepository(
         }
     }
 
+    suspend fun updateStageSettings(
+        id: String,
+        stage: StageSettings,
+    ): Script? =
+        withContext(Dispatchers.IO) {
+            val existing = getScriptOnIo(id) ?: return@withContext null
+            val sanitized = stage.sanitized()
+            if (existing.stage == sanitized) {
+                return@withContext existing
+            }
+            val updated = existing.copy(stage = sanitized)
+            writeScript(updated)
+            updated
+        }
+
     suspend fun duplicateScript(id: String): Script? =
         withContext(Dispatchers.IO) {
             val existing = getScriptOnIo(id) ?: return@withContext null
@@ -343,20 +358,23 @@ class ScriptRepository(
 
     private fun readScript(file: File): Script = jsonToScript(JSONObject(file.readText(Charsets.UTF_8)))
 
-    private fun scriptToJson(script: Script): String =
-        JSONObject()
-            .put("version", 1)
-            .put("id", script.id)
-            .put("title", script.title)
-            .put("content", script.content)
-            .put("createdAt", script.createdAt)
-            .put("updatedAt", script.updatedAt)
-            .put("favorite", script.favorite)
-            .put("lastPosition", script.lastPosition.toDouble())
-            .put("lastOpenedAt", script.lastOpenedAt)
-            .put("words", script.words)
-            .put("characters", script.characters)
-            .toString()
+    private fun scriptToJson(script: Script): String {
+        val json =
+            JSONObject()
+                .put("version", 2)
+                .put("id", script.id)
+                .put("title", script.title)
+                .put("content", script.content)
+                .put("createdAt", script.createdAt)
+                .put("updatedAt", script.updatedAt)
+                .put("favorite", script.favorite)
+                .put("lastPosition", script.lastPosition.toDouble())
+                .put("lastOpenedAt", script.lastOpenedAt)
+                .put("words", script.words)
+                .put("characters", script.characters)
+        script.stage?.let { stage -> json.put("stage", stageToJson(stage)) }
+        return json.toString()
+    }
 
     private fun jsonToScript(json: JSONObject): Script {
         val content = json.optString("content")
@@ -367,12 +385,57 @@ class ScriptRepository(
             createdAt = json.optLong("createdAt"),
             updatedAt = json.optLong("updatedAt"),
             favorite = json.optBoolean("favorite"),
+            stage = json.optJSONObject("stage")?.let(::jsonToStageSettings),
             lastPosition = json.optDouble("lastPosition", 0.0).toFloat().coerceIn(0f, 1f),
             lastOpenedAt = json.optLong("lastOpenedAt"),
             words = json.optInt("words", wordCount(content)),
             characters = json.optInt("characters", content.length),
         )
     }
+
+    private fun stageToJson(stage: StageSettings): JSONObject =
+        JSONObject()
+            .put("speedWpm", stage.speedWpm.toDouble())
+            .put("fontSizeSp", stage.fontSizeSp.toDouble())
+            .put("focusFraction", stage.focusFraction.toDouble())
+            .put("edgeAlpha", stage.edgeAlpha.toDouble())
+            .put("marginDp", stage.marginDp.toDouble())
+            .put("lineSpacing", stage.lineSpacing.toDouble())
+            .put("font", stage.font.name)
+            .put("weight", stage.weight.name)
+            .put("alignment", stage.alignment.name)
+            .put("textColor", stage.textColor.name)
+            .put("background", stage.background.name)
+            .put("mirrorHorizontal", stage.mirrorHorizontal)
+            .put("mirrorVertical", stage.mirrorVertical)
+            .put("countdownSeconds", stage.countdownSeconds)
+            .put("loop", stage.loop)
+            .put("keepAwake", stage.keepAwake)
+
+    private fun jsonToStageSettings(json: JSONObject): StageSettings =
+        StageSettings(
+            speedWpm = json.optDouble("speedWpm", 140.0).toFloat(),
+            fontSizeSp = json.optDouble("fontSizeSp", 46.0).toFloat(),
+            focusFraction = json.optDouble("focusFraction", 0.5).toFloat(),
+            edgeAlpha = json.optDouble("edgeAlpha", 0.28).toFloat(),
+            marginDp = json.optDouble("marginDp", 28.0).toFloat(),
+            lineSpacing = json.optDouble("lineSpacing", 1.34).toFloat(),
+            font = enumValue(json.optString("font"), StageFont.SANS),
+            weight = enumValue(json.optString("weight"), StageWeight.MEDIUM),
+            alignment = enumValue(json.optString("alignment"), StageAlignment.CENTER),
+            textColor = enumValue(json.optString("textColor"), StageTextColor.WARM_WHITE),
+            background = enumValue(json.optString("background"), StageBackground.BLACK),
+            mirrorHorizontal = json.optBoolean("mirrorHorizontal"),
+            mirrorVertical = json.optBoolean("mirrorVertical"),
+            countdownSeconds = json.optInt("countdownSeconds", 3),
+            loop = json.optBoolean("loop"),
+            keepAwake = json.optBoolean("keepAwake", true),
+        ).sanitized()
+
+    private inline fun <reified T : Enum<T>> enumValue(
+        value: String,
+        fallback: T,
+    ): T = enumValues<T>().firstOrNull { it.name == value } ?: fallback
 
     private fun scriptFile(id: String): File = File(scriptsDir, "$id.$SCRIPT_EXTENSION")
 

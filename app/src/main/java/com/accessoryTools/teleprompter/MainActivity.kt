@@ -1,6 +1,7 @@
 package com.accessoryTools.teleprompter
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
@@ -14,12 +15,15 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.media.projection.MediaProjectionManager
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import android.util.Rational
+import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -65,17 +69,21 @@ import com.accessoryTools.teleprompter.data.ScriptSharing
 import com.accessoryTools.teleprompter.overlay.PrompterOverlayService
 import com.accessoryTools.teleprompter.platform.PrompterCommandReceiver
 import com.accessoryTools.teleprompter.prompter.PrompterSession
-import com.accessoryTools.teleprompter.ui.Phase0StageScreen
+import com.accessoryTools.teleprompter.ui.StageScreen
 import com.accessoryTools.teleprompter.ui.TeleprompterTheme
 import com.accessoryTools.teleprompter.ui.editor.EditorScreen
 import com.accessoryTools.teleprompter.ui.library.LibraryScreen
 import com.accessoryTools.teleprompter.ui.settings.SettingsScreen
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val pipModeState = mutableStateOf(false)
+    private val stageActive = mutableStateOf(false)
     private val incomingIntent = mutableStateOf<Intent?>(null)
     private var pipAspectIndex = 0
+    private lateinit var mediaSession: MediaSession
 
     private val pipResizeReceiver =
         object : BroadcastReceiver() {
@@ -100,6 +108,7 @@ class MainActivity : ComponentActivity() {
         )
         incomingIntent.value = intent
         val launchOnPrompter = intent.getBooleanExtra(EXTRA_OPEN_PROMPTER, false)
+        createMediaSession()
         setContent {
             TeleprompterTheme {
                 TeleprompterRoot(
@@ -315,21 +324,42 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        DisposableEffect(onStage, isInPip) {
+        DisposableEffect(onStage, isInPip, PrompterSession.keepAwakeEnabled) {
             val window = activity.window
             val controller = WindowCompat.getInsetsController(window, window.decorView)
             if (onStage && !isInPip) {
                 controller.systemBarsBehavior =
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 controller.hide(WindowInsetsCompat.Type.systemBars())
-                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             } else {
                 controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+            if (onStage && PrompterSession.keepAwakeEnabled) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
             onDispose {
                 controller.show(WindowInsetsCompat.Type.systemBars())
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+
+        DisposableEffect(onStage) {
+            activity.stageActive.value = onStage
+            activity.mediaSession.isActive = onStage
+            if (onStage) {
+                activity.updateMediaSessionState()
+            }
+            onDispose {
+                activity.stageActive.value = false
+                activity.mediaSession.isActive = false
+            }
+        }
+
+        LaunchedEffect(onStage, PrompterSession.isPlaying, PrompterSession.countdownRemaining) {
+            if (onStage) {
+                activity.updateMediaSessionState()
             }
         }
 
@@ -342,22 +372,53 @@ class MainActivity : ComponentActivity() {
                     if (event == Lifecycle.Event.ON_PAUSE) {
                         val id = PrompterSession.scriptId ?: return@LifecycleEventObserver
                         val progress = PrompterSession.progress
-                        scope.launch { app.scripts.saveProgress(id, progress) }
+                        val stage = PrompterSession.currentStageSettings()
+                        scope.launch {
+                            app.scripts.updateStageSettings(id, stage)
+                            app.scripts.saveProgress(id, progress)
+                        }
                     }
                 }
             activity.lifecycle.addObserver(observer)
             onDispose { activity.lifecycle.removeObserver(observer) }
         }
 
+        DisposableEffect(onStage) {
+            if (!onStage) {
+                return@DisposableEffect onDispose { }
+            }
+            var saveJob: Job? = null
+            PrompterSession.onStageSettingsChanged = { settings ->
+                val id = PrompterSession.scriptId
+                if (id != null) {
+                    saveJob?.cancel()
+                    saveJob =
+                        scope.launch {
+                            delay(350)
+                            app.scripts.updateStageSettings(id, settings)
+                        }
+                }
+            }
+            onDispose {
+                saveJob?.cancel()
+                PrompterSession.onStageSettingsChanged = null
+            }
+        }
+
         val saveStageProgress: suspend () -> Unit = {
             val id = PrompterSession.scriptId
             if (id != null) {
+                app.scripts.updateStageSettings(id, PrompterSession.currentStageSettings())
                 app.scripts.saveProgress(id, PrompterSession.progress)
             }
         }
 
         val exitStage: () -> Unit = {
             scope.launch {
+                PrompterSession.setControlLocked(false)
+                if (!PrompterSession.overlayRunning) {
+                    PrompterSession.setPlayback(false)
+                }
                 saveStageProgress()
                 navController.popBackStack()
             }
@@ -504,6 +565,7 @@ class MainActivity : ComponentActivity() {
                                 title = fresh.title,
                                 content = fresh.content,
                                 startProgress = fresh.lastPosition,
+                                stage = fresh.stage,
                             )
                             navController.navigate(Routes.STAGE)
                         }
@@ -561,6 +623,7 @@ class MainActivity : ComponentActivity() {
                                     title = updated.title,
                                     content = updated.content,
                                     startProgress = updated.lastPosition,
+                                    stage = updated.stage,
                                 )
                                 navController.navigate(Routes.STAGE)
                             },
@@ -619,7 +682,7 @@ class MainActivity : ComponentActivity() {
 
             composable(Routes.STAGE) {
                 BackHandler(onBack = exitStage)
-                Phase0StageScreen(
+                StageScreen(
                     isInPip = isInPip,
                     pipSupported = pipSupported,
                     overlayRunning = PrompterSession.overlayRunning,
@@ -643,7 +706,191 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(pipResizeReceiver) }
+        if (::mediaSession.isInitialized) {
+            mediaSession.isActive = false
+            mediaSession.release()
+        }
         super.onDestroy()
+    }
+
+    @SuppressLint("RestrictedApi")
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (stageActive.value && handleStageKey(event)) {
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun handleStageKey(event: KeyEvent): Boolean {
+        val onDown = event.action == KeyEvent.ACTION_DOWN
+        val firstPress = onDown && event.repeatCount == 0
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_SPACE,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_BUTTON_A,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+            KeyEvent.KEYCODE_HEADSETHOOK,
+            -> {
+                if (firstPress) {
+                    PrompterSession.togglePlay()
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_LEFT,
+            KeyEvent.KEYCODE_MEDIA_REWIND,
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+            -> {
+                if (onDown) {
+                    PrompterSession.seekBySeconds(-SEEK_STEP_SECONDS)
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+            KeyEvent.KEYCODE_MEDIA_NEXT,
+            -> {
+                if (onDown) {
+                    PrompterSession.seekBySeconds(SEEK_STEP_SECONDS)
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_VOLUME_UP,
+            -> {
+                if (onDown) {
+                    PrompterSession.nudgeSpeed(SPEED_STEP)
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_VOLUME_DOWN,
+            -> {
+                if (onDown) {
+                    PrompterSession.nudgeSpeed(-SPEED_STEP)
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_PAGE_UP -> {
+                if (onDown) {
+                    PrompterSession.nudgeFontSize(2f)
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_PAGE_DOWN -> {
+                if (onDown) {
+                    PrompterSession.nudgeFontSize(-2f)
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_R,
+            KeyEvent.KEYCODE_BUTTON_B,
+            -> {
+                if (firstPress) {
+                    PrompterSession.restart()
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_M -> {
+                if (firstPress) {
+                    PrompterSession.toggleMirrorHorizontal()
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_L -> {
+                if (firstPress) {
+                    PrompterSession.toggleLock()
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_MEDIA_STOP -> {
+                if (onDown) {
+                    PrompterSession.setPlayback(false)
+                }
+                return true
+            }
+
+            else -> {
+                return false
+            }
+        }
+    }
+
+    private fun createMediaSession() {
+        mediaSession = MediaSession(this, MEDIA_SESSION_TAG)
+        mediaSession.setCallback(
+            object : MediaSession.Callback() {
+                override fun onPlay() {
+                    if (!PrompterSession.isPlaying && PrompterSession.countdownRemaining == 0) {
+                        PrompterSession.togglePlay()
+                    }
+                    updateMediaSessionState()
+                }
+
+                override fun onPause() {
+                    PrompterSession.setPlayback(false)
+                    updateMediaSessionState()
+                }
+
+                override fun onStop() {
+                    PrompterSession.setPlayback(false)
+                    updateMediaSessionState()
+                }
+
+                override fun onSkipToNext() {
+                    PrompterSession.seekBySeconds(SEEK_STEP_SECONDS)
+                }
+
+                override fun onSkipToPrevious() {
+                    PrompterSession.seekBySeconds(-SEEK_STEP_SECONDS)
+                }
+
+                override fun onFastForward() {
+                    PrompterSession.seekBySeconds(MEDIA_SEEK_SECONDS)
+                }
+
+                override fun onRewind() {
+                    PrompterSession.seekBySeconds(-MEDIA_SEEK_SECONDS)
+                }
+            },
+        )
+        updateMediaSessionState()
+    }
+
+    fun updateMediaSessionState() {
+        if (!::mediaSession.isInitialized) {
+            return
+        }
+        val playing = PrompterSession.isPlaying
+        val state =
+            PlaybackState
+                .Builder()
+                .setActions(
+                    PlaybackState.ACTION_PLAY or
+                        PlaybackState.ACTION_PAUSE or
+                        PlaybackState.ACTION_PLAY_PAUSE or
+                        PlaybackState.ACTION_STOP or
+                        PlaybackState.ACTION_SKIP_TO_NEXT or
+                        PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                        PlaybackState.ACTION_FAST_FORWARD or
+                        PlaybackState.ACTION_REWIND,
+                ).setState(
+                    if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
+                    PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                    if (playing) 1f else 0f,
+                ).build()
+        mediaSession.setPlaybackState(state)
     }
 
     private fun openOverlayPermissionSettings() {
@@ -668,9 +915,13 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_OPEN_PROMPTER = "open_prompter"
         private const val TAG = "TeleprompterPip"
+        private const val MEDIA_SESSION_TAG = "Teleprompter"
         private const val REQUEST_PIP_PLAY_PAUSE = 21
         private const val REQUEST_PIP_RESTART = 22
         private const val REQUEST_PIP_RESIZE = 23
+        private const val SPEED_STEP = 5f
+        private const val SEEK_STEP_SECONDS = 5f
+        private const val MEDIA_SEEK_SECONDS = 15f
 
         private val PIP_ASPECTS =
             listOf(

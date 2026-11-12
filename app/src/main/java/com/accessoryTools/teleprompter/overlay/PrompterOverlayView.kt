@@ -14,6 +14,9 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.view.View
+import com.accessoryTools.teleprompter.data.StageAlignment
+import com.accessoryTools.teleprompter.data.StageFont
+import com.accessoryTools.teleprompter.data.StageWeight
 import com.accessoryTools.teleprompter.prompter.PrompterSession
 import kotlin.math.max
 import kotlin.math.min
@@ -42,7 +45,6 @@ class PrompterOverlayView(
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
         }
-    private val horizontalPadding = 28f * density
     private val maxContentWidth = 1_000f * density
 
     private var fillLayout: StaticLayout? = null
@@ -50,10 +52,16 @@ class PrompterOverlayView(
     private var layoutLeft = 0f
     private var layoutWidth = 0
     private var layoutFontSizeSp = -1f
+    private var layoutLineSpacing = -1f
+    private var layoutMarginDp = -1f
+    private var layoutFont = StageFont.SANS
+    private var layoutWeight = StageWeight.MEDIUM
+    private var layoutAlignment = StageAlignment.CENTER
     private var layoutScript = ""
     private var maskShader: LinearGradient? = null
     private var maskShaderEdge = -1f
     private var maskShaderFocus = -1f
+    private var maskShaderHeight = -1
     private var attached = false
     private var looping = false
 
@@ -119,7 +127,15 @@ class PrompterOverlayView(
             return
         }
         val currentFontSize = PrompterSession.fontSizeSp
-        if (layoutWidth != width || layoutFontSizeSp != currentFontSize || layoutScript != PrompterSession.script) {
+        if (layoutWidth != width ||
+            layoutFontSizeSp != currentFontSize ||
+            layoutLineSpacing != PrompterSession.lineSpacing ||
+            layoutMarginDp != PrompterSession.marginDp ||
+            layoutFont != PrompterSession.stageFont ||
+            layoutWeight != PrompterSession.stageWeight ||
+            layoutAlignment != PrompterSession.stageAlignment ||
+            layoutScript != PrompterSession.script
+        ) {
             rebuildLayout(width)
         }
         val layout = fillLayout ?: return
@@ -131,7 +147,20 @@ class PrompterOverlayView(
         outlinePaint.color = PrompterSession.effectiveOutlineColorArgb
         val focusY = height * PrompterSession.focusFraction
         val translateY = focusY - PrompterSession.offsetPx
+        val mirrorHorizontal = PrompterSession.mirrorHorizontal
+        val mirrorVertical = PrompterSession.mirrorVertical
 
+        canvas.save()
+        if (mirrorHorizontal || mirrorVertical) {
+            canvas.translate(
+                if (mirrorHorizontal) width.toFloat() else 0f,
+                if (mirrorVertical) height.toFloat() else 0f,
+            )
+            canvas.scale(
+                if (mirrorHorizontal) -1f else 1f,
+                if (mirrorVertical) -1f else 1f,
+            )
+        }
         canvas.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), null)
         canvas.save()
         canvas.translate(layoutLeft, translateY)
@@ -140,18 +169,22 @@ class PrompterOverlayView(
         canvas.restore()
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), maskPaintFor())
         canvas.restore()
+        canvas.restore()
     }
 
     private fun rebuildLayout(viewWidth: Int) {
         if (viewWidth <= 0) {
             return
         }
+        val margin = PrompterSession.marginDp * density
         val availableWidth =
             max(
                 1,
-                min(viewWidth - horizontalPadding * 2f, maxContentWidth).toInt(),
+                min(viewWidth - margin * 2f, maxContentWidth).toInt(),
             )
         layoutLeft = (viewWidth - availableWidth) / 2f
+        fillPaint.typeface = typefaceFor(PrompterSession.stageFont, PrompterSession.stageWeight)
+        outlinePaint.typeface = fillPaint.typeface
         val fontSizePx = PrompterSession.fontSizeSp * scaledDensity
         fillPaint.textSize = fontSizePx
         outlinePaint.textSize = fontSizePx
@@ -160,6 +193,11 @@ class PrompterOverlayView(
         outlineLayout = buildLayout(text, availableWidth, outlinePaint)
         layoutWidth = viewWidth
         layoutFontSizeSp = PrompterSession.fontSizeSp
+        layoutLineSpacing = PrompterSession.lineSpacing
+        layoutMarginDp = PrompterSession.marginDp
+        layoutFont = PrompterSession.stageFont
+        layoutWeight = PrompterSession.stageWeight
+        layoutAlignment = PrompterSession.stageAlignment
         layoutScript = text
         maskShader = null
         PrompterSession.updateLayout(
@@ -169,24 +207,50 @@ class PrompterOverlayView(
         invalidate()
     }
 
+    private fun typefaceFor(
+        font: StageFont,
+        weight: StageWeight,
+    ): Typeface {
+        val family =
+            when (font) {
+                StageFont.SANS -> if (weight == StageWeight.MEDIUM) "sans-serif-medium" else "sans-serif"
+                StageFont.SERIF -> "serif"
+                StageFont.MONO -> "monospace"
+            }
+        val style = if (weight == StageWeight.BOLD) Typeface.BOLD else Typeface.NORMAL
+        return Typeface.create(family, style)
+    }
+
     private fun buildLayout(
         text: String,
         availableWidth: Int,
         paint: TextPaint,
-    ): StaticLayout =
-        StaticLayout.Builder
+    ): StaticLayout {
+        val alignment =
+            if (PrompterSession.stageAlignment == StageAlignment.LEFT) {
+                Layout.Alignment.ALIGN_NORMAL
+            } else {
+                Layout.Alignment.ALIGN_CENTER
+            }
+        return StaticLayout.Builder
             .obtain(text, 0, text.length, paint, availableWidth)
-            .setAlignment(Layout.Alignment.ALIGN_CENTER)
-            .setLineSpacing(0f, 1.34f)
+            .setAlignment(alignment)
+            .setLineSpacing(0f, PrompterSession.lineSpacing)
             .setIncludePad(false)
             .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
             .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
             .build()
+    }
 
     private fun maskPaintFor(): Paint {
         val edge = PrompterSession.gradientEdgeAlpha
         val focus = PrompterSession.focusFraction
-        if (maskShader == null || maskShaderEdge != edge || maskShaderFocus != focus) {
+        val currentHeight = height
+        if (maskShader == null ||
+            maskShaderEdge != edge ||
+            maskShaderFocus != focus ||
+            maskShaderHeight != currentHeight
+        ) {
             val band = 0.09f
             val colors =
                 intArrayOf(
@@ -207,7 +271,7 @@ class PrompterOverlayView(
                     0f,
                     0f,
                     0f,
-                    height.toFloat(),
+                    currentHeight.toFloat(),
                     colors,
                     positions,
                     Shader.TileMode.CLAMP,
@@ -215,6 +279,7 @@ class PrompterOverlayView(
             maskPaint.shader = maskShader
             maskShaderEdge = edge
             maskShaderFocus = focus
+            maskShaderHeight = currentHeight
         }
         return maskPaint
     }

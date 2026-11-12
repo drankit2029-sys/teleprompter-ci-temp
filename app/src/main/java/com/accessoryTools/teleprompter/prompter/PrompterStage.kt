@@ -1,5 +1,6 @@
 package com.accessoryTools.teleprompter.prompter
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.Hyphens
 import androidx.compose.ui.text.style.LineBreak
@@ -33,19 +35,22 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.accessoryTools.teleprompter.data.StageAlignment
+import com.accessoryTools.teleprompter.data.StageFont
+import com.accessoryTools.teleprompter.data.StageWeight
+import com.accessoryTools.teleprompter.data.argb
 import kotlin.math.roundToInt
 
 @Composable
 fun PrompterStage(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
-    textColor: Color = Color(0xFFF7F4EC),
-    outlineColor: Color = Color(0xCC000000),
 ) {
     BoxWithConstraints(
         modifier =
             modifier
                 .fillMaxSize()
+                .background(Color(PrompterSession.backgroundPreset.argb))
                 .clipToBounds(),
     ) {
         val density = LocalDensity.current
@@ -58,12 +63,34 @@ fun PrompterStage(
             } else {
                 rawFontSizeSp
             }
-        val sidePadding = if (compact) 10.dp else 28.dp
+        val sidePadding = if (compact) 10.dp else PrompterSession.marginDp.dp
         val maxTextWidth = if (compact) 2_000.dp else 1_000.dp
         val edgeAlpha = PrompterSession.gradientEdgeAlpha
         val focus = PrompterSession.focusFraction
+        val textColor = Color(PrompterSession.effectiveTextColorArgb)
+        val outlineColor = Color(PrompterSession.effectiveOutlineColorArgb)
+        val fontFamily =
+            when (PrompterSession.stageFont) {
+                StageFont.SANS -> FontFamily.SansSerif
+                StageFont.SERIF -> FontFamily.Serif
+                StageFont.MONO -> FontFamily.Monospace
+            }
+        val fontWeight =
+            when (PrompterSession.stageWeight) {
+                StageWeight.REGULAR -> FontWeight.Normal
+                StageWeight.MEDIUM -> FontWeight.Medium
+                StageWeight.BOLD -> FontWeight.Bold
+            }
+        val textAlign =
+            when (PrompterSession.stageAlignment) {
+                StageAlignment.CENTER -> TextAlign.Center
+                StageAlignment.LEFT -> TextAlign.Left
+            }
+        val lineSpacing = PrompterSession.lineSpacing
+        val mirrorHorizontal = PrompterSession.mirrorHorizontal
+        val mirrorVertical = PrompterSession.mirrorVertical
         val maskBrush =
-            remember(edgeAlpha, focus) {
+            remember(edgeAlpha, focus, mirrorHorizontal, mirrorVertical) {
                 val band = 0.09f
                 Brush.verticalGradient(
                     colorStops =
@@ -76,12 +103,13 @@ fun PrompterStage(
                 )
             }
         val textStyle =
-            remember(fontSizeSp, outlineColor) {
+            remember(fontSizeSp, lineSpacing, outlineColor, fontFamily, fontWeight, textAlign) {
                 TextStyle(
                     fontSize = fontSizeSp.sp,
-                    lineHeight = (fontSizeSp * 1.34f).sp,
-                    fontWeight = FontWeight.Medium,
-                    textAlign = TextAlign.Center,
+                    lineHeight = (fontSizeSp * lineSpacing).sp,
+                    fontFamily = fontFamily,
+                    fontWeight = fontWeight,
+                    textAlign = textAlign,
                     lineBreak = LineBreak.Simple,
                     hyphens = Hyphens.None,
                     shadow =
@@ -99,6 +127,8 @@ fun PrompterStage(
                     Modifier
                         .fillMaxSize()
                         .graphicsLayer {
+                            scaleX = if (mirrorHorizontal) -1f else 1f
+                            scaleY = if (mirrorVertical) -1f else 1f
                             compositingStrategy = CompositingStrategy.Offscreen
                         }.drawWithContent {
                             drawContent()

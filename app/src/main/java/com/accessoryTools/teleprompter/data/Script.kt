@@ -9,6 +9,7 @@ data class Script(
     val createdAt: Long,
     val updatedAt: Long,
     val favorite: Boolean = false,
+    val stage: StageSettings? = null,
     val lastPosition: Float = 0f,
     val lastOpenedAt: Long = 0L,
     val words: Int = wordCount(content),
