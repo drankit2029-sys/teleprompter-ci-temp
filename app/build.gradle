@@ -12,7 +12,7 @@ android {
 
     defaultConfig {
         applicationId = 'com.accessoryTools.teleprompter'
-        minSdk = 26
+        minSdk = 28
         targetSdk = 37
         versionCode = 1
         versionName = '1.0.0'
@@ -31,6 +31,14 @@ android {
 
     lint {
         lintConfig file("$rootDir/lint.xml")
+        // check.sh is the fast loop: run the API-compatibility checks declared
+        // in lint.xml. Use -PfullLint=true for a complete lint pass before
+        // checkpoints or release builds.
+        if (project.findProperty("fullLint") != "true") {
+            checkOnly.addAll(['NewApi', 'InlinedApi', 'OldTargetApi'])
+        }
+        checkTestSources = false
+        checkGeneratedSources = false
         abortOnError true
         checkReleaseBuilds true
         warningsAsErrors false

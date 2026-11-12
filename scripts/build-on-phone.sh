@@ -16,6 +16,8 @@
 #   -b, --build-device SER  adb serial of the Termux build phone (default: auto)
 #       --display-size SPEC scrcpy --new-display size (default: 1080x2400/420)
 #       --no-scrcpy         Skip scrcpy; launch on the main display
+#       --check             Run lint + ktlint on the phone only; no install
+#       --full-lint         With --check, run the complete lint suite
 #       --forget-device     Forget the remembered install target and exit
 #       --install-global    Install this command into the Android SDK bin and exit
 #   -h, --help              Show this help
@@ -59,6 +61,8 @@ TARGET_OPT=""
 BUILD_OPT=""
 DISPLAY_SIZE="${SCRCPY_DISPLAY_SIZE:-1080x2400/420}"
 USE_SCRCPY=1
+CHECK_ONLY=0
+FULL_LINT=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -67,6 +71,8 @@ while [ "$#" -gt 0 ]; do
         -b|--build-device) BUILD_OPT="${2:?--build-device needs a serial}"; shift 2 ;;
         --display-size)   DISPLAY_SIZE="${2:?--display-size needs WxH[/DPI]}"; shift 2 ;;
         --no-scrcpy|--no-display) USE_SCRCPY=0; shift ;;
+        --check)          CHECK_ONLY=1; shift ;;
+        --full-lint)      FULL_LINT=1; shift ;;
         --forget-device)
             rm -f "$STATE_FILE"
             info "Forgot the remembered install device."
@@ -87,6 +93,10 @@ while [ "$#" -gt 0 ]; do
         *) die "unknown option: $1 (try --help)" ;;
     esac
 done
+
+if [ "$FULL_LINT" -eq 1 ] && [ "$CHECK_ONLY" -ne 1 ]; then
+    die "--full-lint requires --check"
+fi
 
 case "$DISPLAY_SIZE" in
     ''|*[!0-9x/]*) die "invalid --display-size '$DISPLAY_SIZE' (expected WxH or WxH/DPI)" ;;
@@ -287,17 +297,75 @@ echo "[2/5] Pushing to phone..."
 adb -s "$BUILD" shell mkdir -p "$STAGE" >/dev/null 2>&1 || true
 adb -s "$BUILD" push "$TMP" "$STAGE/$PROJECT-sync.tar.gz" >/dev/null
 
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    echo "[3/3] Checking on phone (lint + ktlint in parallel)..."
+    LINT_FULL_ARG=""
+    if [ "$FULL_LINT" -eq 1 ]; then
+        LINT_FULL_ARG="-PfullLint=true"
+    fi
+    "${SSH[@]}" "set -euo pipefail
+cd \$HOME
+tar -xzf '$STAGE/$PROJECT-sync.tar.gz'
+cd '$PROJECT_DIR_NAME'
+chmod +x ./gradlew
+[ -f local.properties ] || echo sdk.dir=\$HOME/android-sdk > local.properties
+KTLINT_BIN=\"\$HOME/.cache/check-on-phone/ktlint-1.8.0\"
+if [ ! -x \"\$KTLINT_BIN\" ]; then
+    mkdir -p \"\$HOME/.cache/check-on-phone\"
+    curl -fsSL https://github.com/pinterest/ktlint/releases/download/1.8.0/ktlint -o \"\$KTLINT_BIN\"
+    chmod +x \"\$KTLINT_BIN\"
+fi
+KTLINT_LOG=\$(mktemp)
+mapfile -d '' files < <(find app/src -name '*.kt' -print0)
+if [ \${#files[@]} -gt 0 ]; then
+    \"\$KTLINT_BIN\" \"\${files[@]}\" >\"\$KTLINT_LOG\" 2>&1 &
+    KTLINT_PID=\$!
+else
+    KTLINT_PID=
+fi
+set +e
+bash ./gradlew :app:lintDebug --configuration-cache --console=plain $LINT_FULL_ARG
+LINT_STATUS=\$?
+KTLINT_STATUS=0
+if [ -n \"\$KTLINT_PID\" ]; then
+    wait \"\$KTLINT_PID\"
+    KTLINT_STATUS=\$?
+    cat \"\$KTLINT_LOG\"
+fi
+rm -f \"\$KTLINT_LOG\"
+set -e
+if [ \"\$LINT_STATUS\" -ne 0 ] || [ \"\$KTLINT_STATUS\" -ne 0 ]; then
+    echo \"Checks failed on phone (lint=\$LINT_STATUS, ktlint=\$KTLINT_STATUS).\" >&2
+    exit 1
+fi"
+    adb -s "$BUILD" shell rm -f "$STAGE/$PROJECT-sync.tar.gz" >/dev/null 2>&1 || true
+    echo "Checks passed on phone."
+    exit 0
+fi
+
 echo "[3/5] Building on phone (incremental)..."
-"${SSH[@]}" "cd \$HOME && tar -xzf '$STAGE/$PROJECT-sync.tar.gz' && cd '$PROJECT_DIR_NAME' && chmod +x ./gradlew && [ -f local.properties ] || echo sdk.dir=\$HOME/android-sdk > local.properties && bash ./gradlew assembleDebug --console=plain"
+"${SSH[@]}" "cd \$HOME && tar -xzf '$STAGE/$PROJECT-sync.tar.gz' && cd '$PROJECT_DIR_NAME' && chmod +x ./gradlew && [ -f local.properties ] || echo sdk.dir=\$HOME/android-sdk > local.properties && bash ./gradlew assembleDebug --configuration-cache --console=plain"
 
 wait_for_target
 echo "[4/5] Installing on $TARGET..."
 "${SSH[@]}" "cp \$HOME/'$PROJECT_DIR_NAME'/app/build/outputs/apk/debug/app-debug.apk '$STAGE/$PROJECT-debug.apk'"
-adb -s "$BUILD" pull "$STAGE/$PROJECT-debug.apk" "$TMP_APK" >/dev/null
-INSTALL_OUT="$(adb -s "$TARGET" install -r "$TMP_APK" 2>&1)" || {
-    printf '%s\n' "$INSTALL_OUT" >&2
-    die "adb install failed"
-}
+if [ "$TARGET" = "$BUILD" ]; then
+    # The APK is already on the phone. Copy it to an adb-readable path and let
+    # the phone install it directly instead of round-tripping through the PC.
+    INSTALL_OUT="$(
+        adb -s "$TARGET" shell "cp '$STAGE/$PROJECT-debug.apk' '/data/local/tmp/$PROJECT-debug.apk' && pm install -r '/data/local/tmp/$PROJECT-debug.apk'" 2>&1
+    )" || {
+        printf '%s\n' "$INSTALL_OUT" >&2
+        die "adb install failed"
+    }
+    adb -s "$TARGET" shell rm -f "/data/local/tmp/$PROJECT-debug.apk" >/dev/null 2>&1 || true
+else
+    adb -s "$BUILD" pull "$STAGE/$PROJECT-debug.apk" "$TMP_APK" >/dev/null
+    INSTALL_OUT="$(adb -s "$TARGET" install -r "$TMP_APK" 2>&1)" || {
+        printf '%s\n' "$INSTALL_OUT" >&2
+        die "adb install failed"
+    }
+fi
 printf '%s\n' "$INSTALL_OUT" | grep -q 'Success' || {
     printf '%s\n' "$INSTALL_OUT" >&2
     die "adb install failed"
@@ -322,6 +390,45 @@ launch_main_display() {
     fi
 }
 
+# scrcpy reports the new display id in its log only after the virtual display
+# exists. Waiting for it avoids the 1-second race in scrcpy's --start-app,
+# which otherwise fails with "No known display id to start app".
+wait_for_virtual_display() {
+    local log="$1" waited=0 id
+    while [ "$waited" -lt 30 ]; do
+        id="$(sed -nE 's/.*New display:.*\(id=([0-9]+)\).*/\1/p' "$log" 2>/dev/null | tail -n1)"
+        if [ -n "$id" ]; then
+            printf '%s\n' "$id"
+            return 0
+        fi
+        kill -0 "$SCRCPY_PID" 2>/dev/null || return 1
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+start_app_on_display() {
+    local display_id="$1" activity attempt out
+    activity="$(resolve_activity || true)"
+    if [ -z "$activity" ] || [ "$activity" = "No activity found" ]; then
+        warn "could not resolve the launcher activity for $APP_ID"
+        return 1
+    fi
+    adb -s "$TARGET" shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
+    for attempt in 1 2 3; do
+        out="$(adb -s "$TARGET" shell am start -W --display "$display_id" -n "$activity" 2>&1 || true)"
+        if printf '%s\n' "$out" | grep -q 'Status: ok'; then
+            echo "     app started on scrcpy display $display_id"
+            return 0
+        fi
+        [ "$attempt" -lt 3 ] && sleep 0.5
+    done
+    printf '%s\n' "$out" >&2
+    warn "could not start $APP_ID on scrcpy display $display_id"
+    return 1
+}
+
 if [ "$USE_SCRCPY" -eq 1 ]; then
     SCRCPY_BIN="${SCRCPY_BIN:-scrcpy}"
     if command -v "$SCRCPY_BIN" >/dev/null 2>&1; then
@@ -337,21 +444,22 @@ if [ "$USE_SCRCPY" -eq 1 ]; then
         fi
         nohup "$SCRCPY_BIN" -s "$TARGET" \
             --new-display="$DISPLAY_SIZE" \
-            --start-app="+$APP_ID" \
             --no-audio \
             --max-size=1600 \
             --window-title="$PROJECT [$TARGET]" \
             >"$LOGFILE" 2>&1 &
         SCRCPY_PID=$!
         printf '%s\n' "$SCRCPY_PID" >"$PIDFILE"
-        sleep 2
-        if kill -0 "$SCRCPY_PID" 2>/dev/null; then
-            echo "     scrcpy pid $SCRCPY_PID, log $LOGFILE"
-        else
+        echo "     scrcpy pid $SCRCPY_PID, log $LOGFILE"
+        if DISPLAY_ID="$(wait_for_virtual_display "$LOGFILE")"; then
+            start_app_on_display "$DISPLAY_ID" || true
+        elif ! kill -0 "$SCRCPY_PID" 2>/dev/null; then
             warn "scrcpy exited; last lines:"
             tail -n 8 "$LOGFILE" >&2 || true
             rm -f "$PIDFILE"
             launch_main_display
+        else
+            warn "scrcpy did not report a virtual display id; app was not started"
         fi
     else
         warn "scrcpy not found; launching on the main display instead"
