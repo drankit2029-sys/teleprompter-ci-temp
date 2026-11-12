@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.accessoryTools.teleprompter.data.wordCount
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -50,12 +51,14 @@ object PrompterSession {
     var script by mutableStateOf(demoScript)
         private set
 
-    val wordCount: Int =
-        script
-            .trim()
-            .split(Regex("\\s+"))
-            .count { it.isNotEmpty() }
-            .coerceAtLeast(1)
+    var scriptTitle by mutableStateOf("Demo script")
+        private set
+
+    var scriptId by mutableStateOf<String?>(null)
+        private set
+
+    var wordCount by mutableIntStateOf(wordCount(demoScript).coerceAtLeast(1))
+        private set
 
     var isPlaying by mutableStateOf(false)
         private set
@@ -106,6 +109,9 @@ object PrompterSession {
     private var frameScheduled = false
     private var lastFrameNanos = 0L
     private var lastLayoutContentHeight = 0f
+    private var pendingStartProgress: Float? = null
+
+    var onPrompterSettingsChanged: ((speedWpm: Float, fontSizeSp: Float, adaptiveContrast: Boolean) -> Unit)? = null
 
     private val frameCallback =
         object : Choreographer.FrameCallback {
@@ -149,6 +155,7 @@ object PrompterSession {
         offsetPx = 0f
         isAtEnd = false
         lastFrameNanos = 0L
+        pendingStartProgress = null
     }
 
     fun restartAndPlay() {
@@ -156,8 +163,42 @@ object PrompterSession {
         setPlayback(true)
     }
 
+    fun loadScript(
+        id: String,
+        title: String,
+        content: String,
+        startProgress: Float,
+    ) {
+        scriptId = id
+        scriptTitle = title.ifBlank { "Untitled script" }
+        script = content
+        wordCount = wordCount(content).coerceAtLeast(1)
+        offsetPx = 0f
+        contentHeightPx = 0f
+        lastLayoutContentHeight = 0f
+        pendingStartProgress = startProgress.coerceIn(0f, 1f)
+        isPlaying = false
+        isAtEnd = false
+        lastFrameNanos = 0L
+    }
+
+    fun applyPersistedSettings(
+        speedWpm: Float,
+        fontSizeSp: Float,
+        adaptiveContrast: Boolean,
+    ) {
+        this.speedWpm = speedWpm.coerceIn(MIN_WPM, MAX_WPM)
+        this.fontSizeSp = fontSizeSp.coerceIn(MIN_FONT_SP, MAX_FONT_SP)
+        adaptiveContrastEnabled = adaptiveContrast
+    }
+
+    private fun persistPrompterSettings() {
+        onPrompterSettingsChanged?.invoke(speedWpm, fontSizeSp, adaptiveContrastEnabled)
+    }
+
     fun updateSpeedWpm(value: Float) {
         speedWpm = value.coerceIn(MIN_WPM, MAX_WPM)
+        persistPrompterSettings()
     }
 
     fun nudgeSpeed(delta: Float) {
@@ -166,6 +207,7 @@ object PrompterSession {
 
     fun updateFontSizeSp(value: Float) {
         fontSizeSp = value.coerceIn(MIN_FONT_SP, MAX_FONT_SP)
+        persistPrompterSettings()
     }
 
     fun nudgeFontSize(delta: Float) {
@@ -182,6 +224,7 @@ object PrompterSession {
 
     fun updateAdaptiveContrastEnabled(enabled: Boolean) {
         adaptiveContrastEnabled = enabled
+        persistPrompterSettings()
     }
 
     fun updateProjectionActive(active: Boolean) {
@@ -207,7 +250,11 @@ object PrompterSession {
         val previousProgress = if (previousContent > 0f) offsetPx / previousContent else 0f
         viewportHeightPx = viewportHeight
         contentHeightPx = contentHeight
-        if (previousContent > 0f && abs(previousContent - contentHeight) > 1f) {
+        val pending = pendingStartProgress
+        if (pending != null && contentHeight > 0f) {
+            offsetPx = (pending * contentHeight).coerceIn(0f, contentHeight)
+            pendingStartProgress = null
+        } else if (previousContent > 0f && abs(previousContent - contentHeight) > 1f) {
             offsetPx = (previousProgress * contentHeight).coerceIn(0f, contentHeight)
         }
         lastLayoutContentHeight = contentHeight
@@ -219,6 +266,7 @@ object PrompterSession {
         offsetPx = clamped * contentHeightPx
         isAtEnd = false
         lastFrameNanos = 0L
+        pendingStartProgress = null
     }
 
     fun updateAdaptiveContrast(luminance: Float) {

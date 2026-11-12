@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
 import android.content.BroadcastReceiver
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -27,14 +28,22 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -42,16 +51,30 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.accessoryTools.teleprompter.data.LibrarySort
+import com.accessoryTools.teleprompter.data.Script
+import com.accessoryTools.teleprompter.data.ScriptImportException
+import com.accessoryTools.teleprompter.data.ScriptImporter
+import com.accessoryTools.teleprompter.data.ScriptSharing
 import com.accessoryTools.teleprompter.overlay.PrompterOverlayService
 import com.accessoryTools.teleprompter.platform.PrompterCommandReceiver
 import com.accessoryTools.teleprompter.prompter.PrompterSession
-import com.accessoryTools.teleprompter.ui.Phase0HomeScreen
 import com.accessoryTools.teleprompter.ui.Phase0StageScreen
 import com.accessoryTools.teleprompter.ui.TeleprompterTheme
+import com.accessoryTools.teleprompter.ui.editor.EditorScreen
+import com.accessoryTools.teleprompter.ui.library.LibraryScreen
+import com.accessoryTools.teleprompter.ui.settings.SettingsScreen
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val pipModeState = mutableStateOf(false)
-    private val startOnPrompter = false
+    private val incomingIntent = mutableStateOf<Intent?>(null)
     private var pipAspectIndex = 0
 
     private val pipResizeReceiver =
@@ -75,12 +98,23 @@ class MainActivity : ComponentActivity() {
             IntentFilter(PrompterCommandReceiver.ACTION_APPLY_PIP_RESIZE),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        val launchOnPrompter = intent.getBooleanExtra(EXTRA_OPEN_PROMPTER, startOnPrompter)
+        incomingIntent.value = intent
+        val launchOnPrompter = intent.getBooleanExtra(EXTRA_OPEN_PROMPTER, false)
         setContent {
             TeleprompterTheme {
-                TeleprompterRoot(initialStage = launchOnPrompter)
+                TeleprompterRoot(
+                    initialStage = launchOnPrompter,
+                    incomingIntent = incomingIntent.value,
+                    onIncomingIntentConsumed = { incomingIntent.value = null },
+                )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        incomingIntent.value = intent
     }
 
     override fun onPictureInPictureModeChanged(
@@ -181,18 +215,32 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun TeleprompterRoot(initialStage: Boolean) {
+    private fun TeleprompterRoot(
+        initialStage: Boolean,
+        incomingIntent: Intent?,
+        onIncomingIntentConsumed: () -> Unit,
+    ) {
         val context = LocalContext.current
         val activity = context as MainActivity
-        var onStage by rememberSaveable { mutableStateOf(initialStage) }
-        var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
-        var startOverlayRequested by remember { mutableStateOf(false) }
-        var awaitingNotificationPermission by remember { mutableStateOf(false) }
+        val app = context.applicationContext as TeleprompterApp
+        val scope = rememberCoroutineScope()
+        val navController = rememberNavController()
+        val backStackEntry by navController.currentBackStackEntryAsState()
+        val currentRoute = backStackEntry?.destination?.route
+        val onStage = currentRoute == Routes.STAGE
         val isInPip = activity.pipModeState.value
         val pipSupported =
             activity.packageManager.hasSystemFeature(
                 PackageManager.FEATURE_PICTURE_IN_PICTURE,
             )
+
+        val scripts by app.scripts.scripts.collectAsState()
+        val loading by app.scripts.loading.collectAsState()
+        val storedSettings by app.settings.settings.collectAsState(initial = null)
+
+        var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+        var startOverlayRequested by remember { mutableStateOf(false) }
+        var awaitingNotificationPermission by remember { mutableStateOf(false) }
 
         val overlayPermissionLauncher =
             rememberLauncherForActivityResult(
@@ -213,7 +261,7 @@ class MainActivity : ComponentActivity() {
                 if (result.resultCode == Activity.RESULT_OK && result.data != null) {
                     PrompterOverlayService.start(
                         context = context,
-                        adaptiveContrast = true,
+                        adaptiveContrast = PrompterSession.adaptiveContrastEnabled,
                         resultCode = result.resultCode,
                         resultData = result.data,
                     )
@@ -261,6 +309,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        LaunchedEffect(initialStage) {
+            if (initialStage) {
+                navController.navigate(Routes.STAGE)
+            }
+        }
+
         DisposableEffect(onStage, isInPip) {
             val window = activity.window
             val controller = WindowCompat.getInsetsController(window, window.decorView)
@@ -279,8 +333,34 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        BackHandler(enabled = onStage && !isInPip) {
-            onStage = false
+        DisposableEffect(onStage, activity) {
+            if (!onStage) {
+                return@DisposableEffect onDispose { }
+            }
+            val observer =
+                LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_PAUSE) {
+                        val id = PrompterSession.scriptId ?: return@LifecycleEventObserver
+                        val progress = PrompterSession.progress
+                        scope.launch { app.scripts.saveProgress(id, progress) }
+                    }
+                }
+            activity.lifecycle.addObserver(observer)
+            onDispose { activity.lifecycle.removeObserver(observer) }
+        }
+
+        val saveStageProgress: suspend () -> Unit = {
+            val id = PrompterSession.scriptId
+            if (id != null) {
+                app.scripts.saveProgress(id, PrompterSession.progress)
+            }
+        }
+
+        val exitStage: () -> Unit = {
+            scope.launch {
+                saveStageProgress()
+                navController.popBackStack()
+            }
         }
 
         val requestOverlayStart: () -> Unit = {
@@ -305,38 +385,259 @@ class MainActivity : ComponentActivity() {
             activity.openOverlayPermissionSettings()
         }
 
-        if (onStage) {
-            Phase0StageScreen(
-                isInPip = isInPip,
-                pipSupported = pipSupported,
-                overlayRunning = PrompterSession.overlayRunning,
-                onExit = { onStage = false },
-                onEnterPip = {
-                    if (!activity.enterPrompterPip()) {
-                        Toast
-                            .makeText(
-                                context,
-                                "Picture-in-picture could not be started",
-                                Toast.LENGTH_SHORT,
-                            ).show()
+        val importUris: suspend (List<Uri>) -> Int = { uris ->
+            var imported = 0
+            var firstError: Throwable? = null
+            uris.forEach { uri ->
+                try {
+                    val document = ScriptImporter.import(context, uri)
+                    app.scripts.createScript(document.title, document.content)
+                    imported += 1
+                } catch (error: Throwable) {
+                    if (firstError == null) {
+                        firstError = error
                     }
-                },
-                onStartOverlay = requestOverlayStart,
-                onStopOverlay = { PrompterOverlayService.stop(context) },
-            )
-        } else {
-            Phase0HomeScreen(
-                overlayPermissionGranted = overlayAllowed,
-                overlayRunning = PrompterSession.overlayRunning,
-                pipSupported = pipSupported,
-                onOpenPrompter = {
-                    PrompterSession.restart()
-                    onStage = true
-                },
-                onRequestOverlayPermission = requestOverlayPermission,
-                onStartOverlay = requestOverlayStart,
-                onStopOverlay = { PrompterOverlayService.stop(context) },
-            )
+                }
+            }
+            if (imported == 0) {
+                throw firstError ?: ScriptImportException("No scripts were imported.")
+            }
+            imported
+        }
+
+        val importClipboard: suspend () -> Boolean = {
+            val clipboard = context.getSystemService(ClipboardManager::class.java)
+            val clip = clipboard?.primaryClip
+            val text =
+                if (clip != null && clip.itemCount > 0) {
+                    clip.getItemAt(0).coerceToText(context)?.toString()
+                } else {
+                    null
+                }
+            if (text.isNullOrBlank()) {
+                false
+            } else {
+                val document = ScriptImporter.fromPlainText(text, "Pasted script")
+                app.scripts.createScript(document.title, document.content)
+                true
+            }
+        }
+
+        LaunchedEffect(incomingIntent) {
+            val intent = incomingIntent ?: return@LaunchedEffect
+            val action = intent.action
+            if (action != Intent.ACTION_SEND && action != Intent.ACTION_VIEW) {
+                onIncomingIntentConsumed()
+                return@LaunchedEffect
+            }
+            runCatching {
+                when {
+                    action == Intent.ACTION_SEND && intent.sharedStream() != null -> {
+                        val uri = intent.sharedStream()!!
+                        val document = ScriptImporter.import(context, uri)
+                        app.scripts.createScript(document.title, document.content)
+                    }
+
+                    action == Intent.ACTION_SEND -> {
+                        val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                        if (text.isNullOrBlank()) {
+                            error("The shared content did not include text.")
+                        }
+                        val document = ScriptImporter.fromPlainText(text, "Shared script")
+                        app.scripts.createScript(document.title, document.content)
+                    }
+
+                    else -> {
+                        val uri = intent.data
+                        if (uri == null) {
+                            error("The opened item did not include a file.")
+                        }
+                        val document = ScriptImporter.import(context, uri)
+                        app.scripts.createScript(document.title, document.content)
+                    }
+                }
+            }.onSuccess { script ->
+                navController.navigate(Routes.editor(script.id))
+            }.onFailure { error ->
+                Toast
+                    .makeText(
+                        context,
+                        error.message ?: "Could not import the shared content.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+            }
+            onIncomingIntentConsumed()
+        }
+
+        NavHost(
+            navController = navController,
+            startDestination = Routes.LIBRARY,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            composable(Routes.LIBRARY) {
+                LibraryScreen(
+                    scripts = scripts,
+                    loading = loading,
+                    initialSort = storedSettings?.sortOrder ?: LibrarySort.UPDATED,
+                    initialFavoritesOnly = storedSettings?.favoritesOnly ?: false,
+                    onSortChanged = { sort ->
+                        app.settings.saveLibraryPreferences(sort, storedSettings?.favoritesOnly ?: false)
+                    },
+                    onFavoritesChanged = { favoritesOnly ->
+                        app.settings.saveLibraryPreferences(
+                            storedSettings?.sortOrder ?: LibrarySort.UPDATED,
+                            favoritesOnly,
+                        )
+                    },
+                    onNewScript = {
+                        scope.launch {
+                            val script = app.scripts.createScript("Untitled script", "")
+                            navController.navigate(Routes.editor(script.id))
+                        }
+                    },
+                    onOpenScript = { id -> navController.navigate(Routes.editor(id)) },
+                    onPresent = { script ->
+                        scope.launch {
+                            val fresh = app.scripts.markOpened(script.id) ?: script
+                            PrompterSession.loadScript(
+                                id = fresh.id,
+                                title = fresh.title,
+                                content = fresh.content,
+                                startProgress = fresh.lastPosition,
+                            )
+                            navController.navigate(Routes.STAGE)
+                        }
+                    },
+                    onToggleFavorite = { script ->
+                        scope.launch {
+                            app.scripts.setFavorite(script.id, !script.favorite)
+                        }
+                    },
+                    onDuplicate = { script ->
+                        scope.launch { app.scripts.duplicateScript(script.id) }
+                    },
+                    onShare = { script -> ScriptSharing.shareText(context, script) },
+                    onDelete = { script ->
+                        scope.launch { app.scripts.deleteScript(script.id) }
+                    },
+                    onRestore = { id ->
+                        scope.launch { app.scripts.restoreScript(id) }
+                    },
+                    onSettings = { navController.navigate(Routes.SETTINGS) },
+                    onImportUris = importUris,
+                    onImportClipboard = importClipboard,
+                )
+            }
+
+            composable(
+                route = Routes.EDITOR,
+                arguments = listOf(navArgument(Routes.EDITOR_ARG) { type = NavType.StringType }),
+            ) { entry ->
+                val id = entry.arguments?.getString(Routes.EDITOR_ARG).orEmpty()
+                val script = scripts.firstOrNull { it.id == id }
+                when {
+                    script != null -> {
+                        EditorScreen(
+                            script = script,
+                            onBack = { title, content ->
+                                app.scripts.updateScript(id, title, content)
+                                navController.popBackStack()
+                            },
+                            onAutosave = { title, content ->
+                                app.scripts.updateScript(id, title, content)
+                            },
+                            onPresent = { title, content ->
+                                val updated =
+                                    app.scripts.updateScript(id, title, content)
+                                        ?: Script(
+                                            id = id,
+                                            title = title,
+                                            content = content,
+                                            createdAt = script.createdAt,
+                                            updatedAt = System.currentTimeMillis(),
+                                        )
+                                PrompterSession.loadScript(
+                                    id = updated.id,
+                                    title = updated.title,
+                                    content = updated.content,
+                                    startProgress = updated.lastPosition,
+                                )
+                                navController.navigate(Routes.STAGE)
+                            },
+                            onShare = { title, content ->
+                                ScriptSharing.shareText(
+                                    context,
+                                    script.copy(title = title, content = content),
+                                )
+                            },
+                            onExport = { title, content, markdown, uri ->
+                                ScriptSharing.export(
+                                    context = context,
+                                    uri = uri,
+                                    title = title,
+                                    content = content,
+                                    markdown = markdown,
+                                )
+                            },
+                        )
+                    }
+
+                    loading -> {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
+                        }
+                    }
+
+                    else -> {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = "This script is no longer available.",
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                        }
+                    }
+                }
+            }
+
+            composable(Routes.SETTINGS) {
+                SettingsScreen(
+                    overlayPermissionGranted = overlayAllowed,
+                    overlayRunning = PrompterSession.overlayRunning,
+                    projectionActive = PrompterSession.projectionActive,
+                    onBack = { navController.popBackStack() },
+                    onRequestOverlayPermission = requestOverlayPermission,
+                    onStartOverlay = requestOverlayStart,
+                    onStopOverlay = { PrompterOverlayService.stop(context) },
+                    onBackup = { uri -> app.scripts.writeBackup(uri) },
+                    onRestore = { uri ->
+                        val restored = app.scripts.restoreBackup(uri)
+                        app.scripts.refresh()
+                        restored
+                    },
+                )
+            }
+
+            composable(Routes.STAGE) {
+                BackHandler(onBack = exitStage)
+                Phase0StageScreen(
+                    isInPip = isInPip,
+                    pipSupported = pipSupported,
+                    overlayRunning = PrompterSession.overlayRunning,
+                    onExit = exitStage,
+                    onEnterPip = {
+                        if (!activity.enterPrompterPip()) {
+                            Toast
+                                .makeText(
+                                    context,
+                                    "Picture-in-picture could not be started",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                        }
+                    },
+                    onStartOverlay = requestOverlayStart,
+                    onStopOverlay = { PrompterOverlayService.stop(context) },
+                )
+            }
         }
     }
 
@@ -352,6 +653,16 @@ class MainActivity : ComponentActivity() {
                 Uri.parse("package:$packageName"),
             )
         startActivity(intent)
+    }
+
+    private object Routes {
+        const val LIBRARY = "library"
+        const val SETTINGS = "settings"
+        const val STAGE = "stage"
+        const val EDITOR_ARG = "scriptId"
+        const val EDITOR = "editor/{$EDITOR_ARG}"
+
+        fun editor(id: String): String = "editor/$id"
     }
 
     companion object {
@@ -370,4 +681,15 @@ class MainActivity : ComponentActivity() {
                 Rational(16, 9),
             )
     }
+}
+
+private fun Intent.sharedStream(): Uri? {
+    val stream =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+    return stream ?: clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
 }

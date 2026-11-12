@@ -50,6 +50,7 @@ class PrompterOverlayView(
     private var layoutLeft = 0f
     private var layoutWidth = 0
     private var layoutFontSizeSp = -1f
+    private var layoutScript = ""
     private var maskShader: LinearGradient? = null
     private var maskShaderEdge = -1f
     private var maskShaderFocus = -1f
@@ -118,7 +119,7 @@ class PrompterOverlayView(
             return
         }
         val currentFontSize = PrompterSession.fontSizeSp
-        if (layoutWidth != width || layoutFontSizeSp != currentFontSize) {
+        if (layoutWidth != width || layoutFontSizeSp != currentFontSize || layoutScript != PrompterSession.script) {
             rebuildLayout(width)
         }
         val layout = fillLayout ?: return
@@ -159,6 +160,7 @@ class PrompterOverlayView(
         outlineLayout = buildLayout(text, availableWidth, outlinePaint)
         layoutWidth = viewWidth
         layoutFontSizeSp = PrompterSession.fontSizeSp
+        layoutScript = text
         maskShader = null
         PrompterSession.updateLayout(
             contentHeight = fillLayout?.height?.toFloat() ?: 0f,

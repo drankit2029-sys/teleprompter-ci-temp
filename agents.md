@@ -25,7 +25,7 @@ Full plan: `plan.md`.
 ## Current status
 
 **Phase 0 — technical spike: complete. Checkpoint `checkpoint/phase-0` created.**
-**Phase 1 — library, editor, import, export: in progress.**
+**Phase 1 — library, editor, import, export: complete. Checkpoint `checkpoint/phase-1` created.**
 
 Phase 0 acceptance completed on the physical target:
 
@@ -56,8 +56,25 @@ Phase 0 acceptance completed on the physical target:
   hyphenated across lines.
 - `scripts/check.sh --full-lint` passes on the phone.
 
-Phase 1 now starts with the file-first library, editor, navigation, import,
-and share/export work described in `plan.md`.
+Phase 1 acceptance completed on the target (routine UI on a scrcpy virtual
+display):
+
+- Scripts survive process death and are stored as atomic `.tpscript` JSON files
+  in app-private storage; the library reseeds one demo script on first launch.
+- Library search, favorites filter, recent/title/newest sorting, empty states,
+  stats, present/edit/share/duplicate, and delete/undo verified.
+- Editor title/content autosave, undo/redo, find/replace (including replace all),
+  statistics, share text, and Markdown/TXT export verified.
+- Import verified for TXT, HTML, and DOCX through the file picker and
+  `ACTION_VIEW`; clipboard paste and `ACTION_SEND` text intake verified.
+- Backup ZIP restore reports the correct count and now skips exact copies;
+  conflicting script IDs are restored with a `(restored)` title suffix instead
+  of duplicating an existing title.
+- Present/stage works after the navigation refactor, restores saved progress,
+  exits back to the library, and PiP entry still works. The transparent overlay
+  service is unchanged from Phase 0; its settings status/permission flow renders
+  correctly.
+- `scripts/check.sh` and `scripts/check.sh --full-lint` pass on the phone.
 
 
 ## Environment / test device
@@ -148,6 +165,22 @@ and share/export work described in `plan.md`.
     with `Hyphens.None`; overlay text uses
     `LineBreaker.BREAK_STRATEGY_SIMPLE` with hyphenation disabled. Scripts are
     stored as continuous paragraphs, not hard-wrapped source lines.
+17. **File-first script storage.** Each script is a `.tpscript` JSON file under
+    `files/scripts`; writes go to a temporary file and are moved into place
+    atomically. Deletes move files to `files/trash` so Undo can republish them.
+    Settings use DataStore preferences.
+18. **Import is defensive.** TXT/Markdown use charset fallback; HTML is stripped;
+    DOCX reads `word/document.xml`; ODT reads `content.xml`. Backups and imports
+    enforce entry-count, size, and title limits. SAF URIs keep the original file
+    untouched.
+19. **Backup restore merges instead of replacing.** Restore skips scripts whose
+    content already exists, assigns a new ID when the incoming ID collides, and
+    suffixes the title with `(restored)` when needed. This makes repeated
+    restores idempotent without deleting user edits.
+20. **Navigation owns screen state.** `MainActivity` hosts Navigation Compose
+    routes `library`, `editor/{scriptId}`, `settings`, and `stage`, and handles
+    incoming share/open intents plus lifecycle progress persistence. The
+    repositories live in `TeleprompterApp`, so every screen sees the same state.
 
 ## Phase 0 implementation map
 
@@ -168,6 +201,27 @@ and share/export work described in `plan.md`.
   resize forwarding.
 - `debug/PipDebugReceiver.kt` — debug-only exported adb hook for PiP resize
   tests; not present in release builds.
+
+## Phase 1 implementation map
+
+- `data/Script.kt` — persisted script model, progress, favorites, statistics.
+- `data/ScriptRepository.kt` — atomic `.tpscript` storage, trash/undo, backup
+  ZIP creation and merge restore.
+- `data/ScriptImporter.kt` — TXT/Markdown/HTML/DOCX/ODT extraction and charset
+  fallback with size limits.
+- `data/ScriptSharing.kt` — text/file sharing and SAF export.
+- `data/SettingsRepository.kt` — DataStore reading defaults and library sort.
+- `ui/library/LibraryScreen.kt` — adaptive library grid, search, favorites,
+  sorting, import, paste, cards, duplicate/delete/undo, empty states.
+- `ui/editor/EditorScreen.kt` — title/content editor, debounced autosave,
+  undo/redo, find/replace, stats, share, Markdown/TXT export, Present.
+- `ui/settings/SettingsScreen.kt` — reading defaults, adaptive contrast,
+  overlay status/permission/start-stop, backup/restore.
+- `MainActivity.kt` — Navigation Compose host, intent intake, PiP, progress
+  persistence.
+- `TeleprompterApp.kt` — repository ownership and one-time demo seed.
+- `prompter/PrompterSession.kt` — loads scripts, applies persisted settings,
+  saves and restores reading progress.
 
 ## Permission / manifest notes
 
@@ -218,7 +272,8 @@ adb -s 10.232.147.72:5555 shell am broadcast \
 - `checkpoint/phase-0-baseline` — template + plan before Phase 0 code.
 - `checkpoint/phase-0` — Phase 0 spike complete and accepted on the target
   device (2026-11-12).
-- `checkpoint/phase-1` — pending.
+- `checkpoint/phase-1` — library, editor, import, export, backup, and intent
+  intake complete and accepted on the target device (2026-11-12).
 - Create future checkpoints only after compile, `scripts/check.sh`, install,
   launch, and the phase acceptance flow pass.
 
@@ -247,8 +302,13 @@ git switch -c recover-phase-0 checkpoint/phase-0
   split-screen and foldable posture move to the Phase 3/5 posture matrix.
 - Existing lint warnings remain (app icon, unused XML resources, touch
   accessibility, string resources); address during Phase 5 polish.
-- Phase 1 introduces persistence, library, editor, and import; no longer a
-  Phase 0 concern.
+- DOCX/ODT import extracts document text only; embedded images, tables, and
+  styling are intentionally out of scope.
+- Phase 1 restore is merge-oriented and never deletes existing scripts; users
+  who want a clean restore must clear app data first.
+- Transparent overlay acceptance remains a main-display test; the Phase 1
+  settings entry point was verified, but the overlay service itself is unchanged
+  from its Phase 0 acceptance.
 
 ## Update log
 
@@ -283,4 +343,14 @@ git switch -c recover-phase-0 checkpoint/phase-0
   fullscreen stage keeps words intact. Full lint passes.
 - 2026-11-12 — Created `checkpoint/phase-0` (commit + annotated tag). Started
   Phase 1.
+- 2026-11-12 — Phase 1 implemented: file-first `.tpscript` repository with
+  atomic writes/trash, DataStore settings, Navigation Compose routes, adaptive
+  library, editor with autosave/undo/find-replace, TXT/HTML/DOCX/ODT import,
+  clipboard paste, share/export, backup/restore, and `ACTION_SEND`/`ACTION_VIEW`
+  intake.
+- 2026-11-12 — Phase 1 acceptance: library search/favorites/sort/delete-undo,
+  editor undo/redo and find/replace, paste, TXT/HTML/DOCX import, share/export,
+  restore merge, Present/stage, progress resume, and PiP all verified. Fixed
+  delete not republishing the library and restore duplicating identical scripts.
+  `check.sh` and `--full-lint` pass. Created `checkpoint/phase-1`.
 
