@@ -26,8 +26,7 @@ Full plan: `plan.md`.
 
 **Phase 0 — technical spike: complete. Checkpoint `checkpoint/phase-0` created.**
 **Phase 1 — library, editor, import, export: complete. Checkpoint `checkpoint/phase-1` created.**
-**Phase 2 — prompter core: implemented; core acceptance passed, final overlay
-acceptance and checkpoint pending.**
+**Phase 2 — prompter core: complete. Checkpoint `checkpoint/phase-2` created.**
 
 Phase 0 acceptance completed on the physical target:
 
@@ -78,8 +77,9 @@ display):
   correctly.
 - `scripts/check.sh` and `scripts/check.sh --full-lint` pass on the phone.
 
-Phase 2 implementation and core acceptance (routine UI on a scrcpy virtual
-display; final transparent-overlay pass still needs the main display):
+Phase 2 implementation and acceptance (routine UI on scrcpy virtual displays;
+transparent overlay, camera overlay, and final PiP checks on the main display
+with the user present):
 
 - Per-script stage settings are stored in each `.tpscript` `stage` object and
   restored with the script; reading defaults remain in DataStore.
@@ -102,18 +102,29 @@ display; final transparent-overlay pass still needs the main display):
 - Keep-awake toggle verified by checking the window's `FLAG_KEEP_SCREEN_ON`
   bit appears and disappears.
 - PiP entry and script rendering verified with the final styling; PiP system
-  actions and compact stage render correctly. Expanding PiP via the system
-  fullscreen button did not work on the scrcpy virtual display; retest on the
-  main display during final acceptance.
+  actions, compact stage rendering, and expanding PiP via the system fullscreen
+  button pass on the main display.
+- Transparent overlay final acceptance passed: styling matches the stage
+  (fonts, weights, colors, margins, spacing, alignment), horizontal/vertical
+  mirrors render correctly, and the overlay controls/script layer behave
+  correctly over camera and third-party apps.
+- Projection-cancel fallback uses manual high-contrast colors with a toast;
+  a clean stop removes both overlay windows and the foreground service, and a
+  subsequent start works normally.
+- Overlay is display-targeted: starting it from the tablet display creates an
+  overlay on that display, and starting it from the main display targets the
+  main display. Secondary displays use manual colors because adaptive contrast
+  is main-display-only.
+- Secondary-display stages keep the system bars visible so Back/Home/Recents
+  remain reachable; main-display immersive behavior is unchanged.
 - `scripts/check.sh --full-lint` passes after suppressing the
   `ComponentActivity.dispatchKeyEvent` restricted-API lint false positive.
 
 
 ## Environment / test device
 
-- Last known build/install target: `10.187.152.9:45125` over Wi-Fi.
-  The Wi-Fi address/port changes across networks; check `adb devices` and
-  `adb connect <phone-ip>:<port>` before running build or check commands.
+- Current build/install target: USB serial `RZCY61Z8TPD`. Wi-Fi ADB addresses
+  are unreliable across networks; prefer USB when available.
 - USB serial: `RZCY61Z8TPD` (use USB when available; it has lower latency).
 - Device: Samsung SM-M366B
 - Android 17 / API 37
@@ -138,9 +149,12 @@ display; final transparent-overlay pass still needs the main display):
 - If the Termux host key changes after a reinstall, remove the stale key:
   `ssh-keygen -R '[127.0.0.1]:8022'`, then connect once with
   `StrictHostKeyChecking=accept-new`.
-- Important: overlay windows attach to the default display. Transparent-overlay
-  and camera-overlay acceptance must be done on the main display or physical
-  phone, with the user present, not on a scrcpy virtual display.
+- Overlay windows are display-targeted: `MainActivity` passes its display ID
+  to `PrompterOverlayService`, which creates a display context so the script
+  and control-bar windows attach to the display hosting the app. Adaptive
+  contrast remains main-display-only; secondary displays fall back to manual
+  colors with a toast. Main-display overlay/camera acceptance still needs the
+  user present.
 - `scripts/check.sh` runs `lintDebug` + ktlint **on the phone** via
   `build-on-phone.sh --check`; it does not use the PC for Gradle work.
 - `scripts/check.sh --full-lint` runs the complete lint suite instead of the
@@ -241,6 +255,12 @@ display; final transparent-overlay pass still needs the main display):
     discoverable without hiding the script. The panel is capped at 46% of
     portrait height and 66% of landscape height so the focus line stays visible;
     speed controls live on the Playback tab and cues are deferred.
+27. **Overlay follows the app's display.** `MainActivity` passes its display ID
+    and the overlay service creates a display context for that display instead
+    of always using the default display. Adaptive contrast stays main-display-
+    only, so secondary displays use manual colors. Secondary-display stages also
+    keep system bars visible, preserving Back/Home/Recents; the main display
+    keeps its immersive stage.
 
 ## Phase 0 implementation map
 
@@ -298,7 +318,11 @@ display; final transparent-overlay pass still needs the main display):
   progress scrubber, transport, countdown/end overlays, lock badge, and
   appearance controls; replaces `Phase0StageScreen.kt`.
 - `MainActivity.kt` — stage-settings load/save, keep-awake window flag,
-  hardware-key handling, MediaSession, and PiP/stage wiring.
+  hardware-key handling, MediaSession, PiP/stage wiring, display-ID plumbing,
+  and secondary-display system-bar handling.
+- `overlay/PrompterOverlayService.kt` — display-context overlay windows,
+  main-display-only adaptive projection, and manual-color fallback on secondary
+  displays.
 - `overlay/PrompterOverlayView.kt` — overlay rendering updated for the same
   fonts, weights, colors, margins, spacing, alignment, and mirrors.
 - `scripts/check.sh --full-lint` — passes on the phone after the final changes.
@@ -354,6 +378,10 @@ adb -s "$PHONE_SERIAL" shell am broadcast \
   device (2026-11-12).
 - `checkpoint/phase-1` — library, editor, import, export, backup, and intent
   intake complete and accepted on the target device (2026-11-12).
+- `checkpoint/phase-2` — prompter core, per-script stage settings, mirrors,
+  countdown/lock/loop, keep-awake, hardware/media controls, PiP, and
+  display-targeted transparent overlay complete and accepted on the target
+  device (2026-11-13).
 - Create future checkpoints only after compile, `scripts/check.sh`, install,
   launch, and the phase acceptance flow pass.
 
@@ -386,9 +414,12 @@ git switch -c recover-phase-0 checkpoint/phase-0
   styling are intentionally out of scope.
 - Phase 1 restore is merge-oriented and never deletes existing scripts; users
   who want a clean restore must clear app data first.
-- Transparent overlay acceptance remains a main-display test; the Phase 1
-  settings entry point was verified, but the overlay service itself is unchanged
-  from its Phase 0 acceptance.
+- Transparent overlay acceptance is main-display or display-targeted; starting
+  from a secondary display places the overlay there with manual colors, and
+  adaptive contrast remains main-display-only.
+- If the host display is removed while the overlay is running, the overlay
+  windows may be destroyed with that display; restart the overlay from the app
+  on the target display.
 
 ## Update log
 
@@ -445,4 +476,16 @@ git switch -c recover-phase-0 checkpoint/phase-0
   off. PiP system fullscreen expand works poorly on the virtual display; retest
   on the main display. Transparent overlay/adaptive contrast final acceptance
   and `checkpoint/phase-2` remain.
+- 2026-11-13 — Display-targeted overlay implemented: `MainActivity` passes its
+  display ID, `PrompterOverlayService` builds a display context for secondary
+  displays, adaptive projection is main-display-only, and secondary stages keep
+  system bars visible. User verified the overlay appears on the tablet display
+  when started there and on the main display when started there. Full lint and
+  ktlint pass; APK built/installed over USB.
+- 2026-11-13 — User completed the remaining Phase 2 acceptance: styling and
+  mirrors in the overlay, projection-cancel fallback, clean stop, and PiP
+  expand all pass. Demo script and DataStore defaults reset to 140 WPM, 46 sp,
+  0:00, 3s countdown, loop off, keep-awake on, warm/black,
+  sans/medium/center, mirrors off, adaptive contrast on; verified on a fresh
+  scrcpy display. Phase 2 accepted; `checkpoint/phase-2` created.
 

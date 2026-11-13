@@ -22,6 +22,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Display
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Toast
@@ -35,8 +36,10 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 class PrompterOverlayService : Service() {
+    private lateinit var overlayContext: Context
     private lateinit var windowManager: WindowManager
     private lateinit var mainHandler: Handler
+    private var targetDisplayId = Display.DEFAULT_DISPLAY
     private var scriptView: PrompterOverlayView? = null
     private var controlBar: OverlayControlBar? = null
     private var controlParams: WindowManager.LayoutParams? = null
@@ -71,7 +74,8 @@ class PrompterOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        windowManager = getSystemService(WindowManager::class.java)
+        overlayContext = this
+        windowManager = overlayContext.getSystemService(WindowManager::class.java)
         mainHandler = Handler(Looper.getMainLooper())
     }
 
@@ -110,10 +114,34 @@ class PrompterOverlayService : Service() {
         }
         val adaptive = intent?.getBooleanExtra(EXTRA_ADAPTIVE_CONTRAST, false) == true
         val resultData = intent?.let { projectionResultData(it) }
+        val requestedDisplayId =
+            intent?.getIntExtra(EXTRA_DISPLAY_ID, Display.DEFAULT_DISPLAY)
+                ?: Display.DEFAULT_DISPLAY
+        val display = getSystemService(DisplayManager::class.java).getDisplay(requestedDisplayId)
+        val displayContext =
+            if (display != null && requestedDisplayId != Display.DEFAULT_DISPLAY) {
+                runCatching { createDisplayContext(display) }.getOrNull()
+            } else {
+                null
+            }
+        overlayContext = displayContext ?: this
+        targetDisplayId =
+            if (displayContext != null) requestedDisplayId else Display.DEFAULT_DISPLAY
+        windowManager = overlayContext.getSystemService(WindowManager::class.java)
+        val projectionAvailable =
+            resultData != null && targetDisplayId == Display.DEFAULT_DISPLAY
+        if (adaptive && !projectionAvailable) {
+            Toast
+                .makeText(
+                    overlayContext,
+                    "Adaptive contrast uses the main display; using manual colors",
+                    Toast.LENGTH_LONG,
+                ).show()
+        }
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
-        startAsForeground(hasProjection = resultData != null)
+        startAsForeground(hasProjection = projectionAvailable)
         showOverlay()
-        if (adaptive && resultData != null) {
+        if (adaptive && resultData != null && targetDisplayId == Display.DEFAULT_DISPLAY) {
             startProjection(resultCode, resultData)
         } else {
             PrompterSession.updateProjectionActive(false)
@@ -154,14 +182,14 @@ class PrompterOverlayService : Service() {
     private fun showOverlay() {
         PrompterSession.updateOverlayRunning(true)
         if (scriptView == null) {
-            val view = PrompterOverlayView(this)
+            val view = PrompterOverlayView(overlayContext)
             windowManager.addView(view, scriptLayoutParams())
             scriptView = view
         }
         if (controlBar == null) {
             val bar =
                 OverlayControlBar(
-                    context = this,
+                    context = overlayContext,
                     onPlayPause = {
                         PrompterSession.togglePlay()
                         scriptView?.kick()
@@ -240,7 +268,7 @@ class PrompterOverlayService : Service() {
             val bounds = windowManager.currentWindowMetrics.bounds
             bounds.width() to bounds.height()
         } else {
-            val metrics = resources.displayMetrics
+            val metrics = overlayContext.resources.displayMetrics
             metrics.widthPixels to metrics.heightPixels
         }
 
@@ -474,13 +502,14 @@ class PrompterOverlayService : Service() {
         super.onDestroy()
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int): Int = (value * overlayContext.resources.displayMetrics.density).toInt()
 
     companion object {
         const val ACTION_START = "com.accessoryTools.teleprompter.action.START_OVERLAY"
         const val ACTION_STOP = "com.accessoryTools.teleprompter.action.STOP_OVERLAY"
         const val ACTION_TOGGLE_PLAY = "com.accessoryTools.teleprompter.action.OVERLAY_TOGGLE_PLAY"
         const val EXTRA_ADAPTIVE_CONTRAST = "adaptive_contrast"
+        const val EXTRA_DISPLAY_ID = "overlay_display_id"
         const val EXTRA_RESULT_CODE = "projection_result_code"
         const val EXTRA_RESULT_DATA = "projection_result_data"
 
@@ -501,11 +530,13 @@ class PrompterOverlayService : Service() {
             adaptiveContrast: Boolean,
             resultCode: Int? = null,
             resultData: Intent? = null,
+            displayId: Int = Display.DEFAULT_DISPLAY,
         ) {
             val intent =
                 Intent(context, PrompterOverlayService::class.java)
                     .setAction(ACTION_START)
                     .putExtra(EXTRA_ADAPTIVE_CONTRAST, adaptiveContrast)
+                    .putExtra(EXTRA_DISPLAY_ID, displayId)
             if (resultCode != null) {
                 intent.putExtra(EXTRA_RESULT_CODE, resultCode)
             }

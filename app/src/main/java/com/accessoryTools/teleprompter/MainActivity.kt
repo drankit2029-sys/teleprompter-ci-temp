@@ -23,6 +23,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import android.util.Rational
+import android.view.Display
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
@@ -238,6 +239,8 @@ class MainActivity : ComponentActivity() {
         val currentRoute = backStackEntry?.destination?.route
         val onStage = currentRoute == Routes.STAGE
         val isInPip = activity.pipModeState.value
+        val overlayDisplayId = activity.currentDisplayId()
+        val onPrimaryDisplay = overlayDisplayId == Display.DEFAULT_DISPLAY
         val pipSupported =
             activity.packageManager.hasSystemFeature(
                 PackageManager.FEATURE_PICTURE_IN_PICTURE,
@@ -267,12 +270,14 @@ class MainActivity : ComponentActivity() {
             rememberLauncherForActivityResult(
                 ActivityResultContracts.StartActivityForResult(),
             ) { result ->
+                val displayId = activity.currentDisplayId()
                 if (result.resultCode == Activity.RESULT_OK && result.data != null) {
                     PrompterOverlayService.start(
                         context = context,
                         adaptiveContrast = PrompterSession.adaptiveContrastEnabled,
                         resultCode = result.resultCode,
                         resultData = result.data,
+                        displayId = displayId,
                     )
                 } else {
                     Toast
@@ -281,7 +286,11 @@ class MainActivity : ComponentActivity() {
                             "Screen capture denied; using manual high-contrast colors",
                             Toast.LENGTH_LONG,
                         ).show()
-                    PrompterOverlayService.start(context, adaptiveContrast = false)
+                    PrompterOverlayService.start(
+                        context,
+                        adaptiveContrast = false,
+                        displayId = displayId,
+                    )
                 }
             }
 
@@ -300,14 +309,31 @@ class MainActivity : ComponentActivity() {
             startOverlayRequested,
             overlayAllowed,
             awaitingNotificationPermission,
+            overlayDisplayId,
         ) {
             if (startOverlayRequested && overlayAllowed && !awaitingNotificationPermission) {
                 startOverlayRequested = false
-                if (PrompterSession.adaptiveContrastEnabled) {
+                val displayId = activity.currentDisplayId()
+                if (
+                    PrompterSession.adaptiveContrastEnabled &&
+                    displayId == Display.DEFAULT_DISPLAY
+                ) {
                     val manager = context.getSystemService(MediaProjectionManager::class.java)
                     projectionLauncher.launch(manager.createScreenCaptureIntent())
                 } else {
-                    PrompterOverlayService.start(context, adaptiveContrast = false)
+                    if (PrompterSession.adaptiveContrastEnabled) {
+                        Toast
+                            .makeText(
+                                context,
+                                "Adaptive contrast uses the main display; using manual colors here",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                    }
+                    PrompterOverlayService.start(
+                        context = context,
+                        adaptiveContrast = false,
+                        displayId = displayId,
+                    )
                 }
             }
         }
@@ -324,10 +350,15 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        DisposableEffect(onStage, isInPip, PrompterSession.keepAwakeEnabled) {
+        DisposableEffect(
+            onStage,
+            isInPip,
+            onPrimaryDisplay,
+            PrompterSession.keepAwakeEnabled,
+        ) {
             val window = activity.window
             val controller = WindowCompat.getInsetsController(window, window.decorView)
-            if (onStage && !isInPip) {
+            if (onStage && !isInPip && onPrimaryDisplay) {
                 controller.systemBarsBehavior =
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 controller.hide(WindowInsetsCompat.Type.systemBars())
@@ -933,6 +964,14 @@ class MainActivity : ComponentActivity() {
             )
     }
 }
+
+private fun Activity.currentDisplayId(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        display?.displayId ?: Display.DEFAULT_DISPLAY
+    } else {
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.displayId
+    }
 
 private fun Intent.sharedStream(): Uri? {
     val stream =
