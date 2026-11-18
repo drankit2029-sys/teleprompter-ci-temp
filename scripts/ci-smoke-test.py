@@ -109,6 +109,8 @@ def scroll_until(text, timeout=40):
             return point
         run(*ADB, "shell", "input", "swipe", "540", "1800", "540", "900", "300")
         time.sleep(1)
+    label = text.replace(" ", "-").lower()
+    shot(f"timeout-{label}")
     raise SystemExit(f"timed out scrolling to {text!r}")
 
 
@@ -130,6 +132,15 @@ def shot(name):
 def overlay_windows():
     out = run(*ADB, "shell", "dumpsys", "window", "windows")
     return out.count("ty=APPLICATION_OVERLAY")
+
+
+def overlay_window_lines():
+    out = run(*ADB, "shell", "dumpsys", "window", "windows")
+    lines = []
+    for line in out.splitlines():
+        if "ty=APPLICATION_OVERLAY" in line or "Window #" in line and "accessoryTools" in line:
+            lines.append(line.strip())
+    return lines
 
 
 def assert_no_crash():
@@ -179,6 +190,8 @@ def main():
     time.sleep(4)
     windows = overlay_windows()
     if windows != 2:
+        for line in overlay_window_lines():
+            print("overlay-window:", line)
         raise SystemExit(f"expected 2 overlay windows, found {windows}")
     print("wm size:", run(*ADB, "shell", "wm", "size").strip())
     print("wm density:", run(*ADB, "shell", "wm", "density").strip())
