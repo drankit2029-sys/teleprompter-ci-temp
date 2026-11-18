@@ -61,6 +61,10 @@ def wait_for(text, timeout=45):
         if point:
             return point
         time.sleep(2)
+    label = text.replace(" ", "-").lower()
+    shot(f"timeout-{label}")
+    with open(f"{OUT}/timeout-{label}.xml", "w", encoding="utf-8") as handle:
+        handle.write(dump())
     raise SystemExit(f"timed out waiting for {text!r}")
 
 
