@@ -119,7 +119,8 @@ Published at the URL above. Covers:
 
 - Unit tests + debug APK build.
 - Emulator smoke test matrix: **API 28, 29, 30, 31, 33, 34, 35, 36**
-  (pixel_5 profile, KVM, parallel).
+  (pixel_5 profile, KVM, parallel) — **all 8 levels pass** (final run
+  44388084563).
 - Scripted flow (`scripts/ci-smoke-test.py`): library → stage → Window tab →
   overlay disclosure → overlay running (bar in lower half) → overlay stopped →
   Settings privacy entry points → no app crashes.
