@@ -744,10 +744,18 @@ class PrompterOverlayService : Service() {
     }
 
     private fun currentScreenBounds(): Pair<Int, Int> {
-        // The service's WindowManager can report a degenerate/foreign rect for
-        // currentWindowMetrics on some API 30 devices. The display metrics of
-        // the overlay context are authoritative for both the main display and
-        // display contexts created for secondary displays.
+        // Service contexts can report window-sized metrics on some API 30
+        // devices. The display's real metrics are authoritative for both the
+        // main display and display contexts created for secondary displays.
+        val display = getSystemService(DisplayManager::class.java).getDisplay(targetDisplayId)
+        if (display != null) {
+            val metrics = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION")
+            display.getRealMetrics(metrics)
+            if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                return metrics.widthPixels to metrics.heightPixels
+            }
+        }
         val metrics = overlayContext.resources.displayMetrics
         return metrics.widthPixels to metrics.heightPixels
     }

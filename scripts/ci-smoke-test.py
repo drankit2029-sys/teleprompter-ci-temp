@@ -153,6 +153,12 @@ def main():
     windows = overlay_windows()
     if windows != 2:
         raise SystemExit(f"expected 2 overlay windows, found {windows}")
+    print("wm size:", run(*ADB, "shell", "wm", "size").strip())
+    print("wm density:", run(*ADB, "shell", "wm", "density").strip())
+    window_dump = run(*ADB, "shell", "dumpsys", "window", "windows")
+    for line in window_dump.splitlines():
+        if "(wrapxwrap)" in line or "Requested w=" in line:
+            print("window:", line.strip())
     bar_y = control_window_y()
     if bar_y is None or bar_y < 1000:
         raise SystemExit(f"overlay bar not positioned in the lower half (y={bar_y})")
