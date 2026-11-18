@@ -72,6 +72,27 @@ def tap_text(text):
     tap(wait_for(text))
 
 
+def scroll_until(text, timeout=40):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        point = find(dump(), text)
+        if point:
+            return point
+        run(*ADB, "shell", "input", "swipe", "540", "1800", "540", "900", "300")
+        time.sleep(1)
+    raise SystemExit(f"timed out scrolling to {text!r}")
+
+
+def control_window_y():
+    out = run(*ADB, "shell", "dumpsys", "window", "windows")
+    for line in out.splitlines():
+        if "(wrapxwrap)" in line and "APPLICATION_OVERLAY" in line:
+            match = re.search(r"\{\((-?\d+),(-?\d+)\)\(wrapxwrap\)", line)
+            if match:
+                return int(match.group(2))
+    return None
+
+
 def shot(name):
     with open(f"{OUT}/{name}.png", "wb") as handle:
         subprocess.run(ADB + ["exec-out", "screencap", "-p"], stdout=handle, check=True)
@@ -132,6 +153,9 @@ def main():
     windows = overlay_windows()
     if windows != 2:
         raise SystemExit(f"expected 2 overlay windows, found {windows}")
+    bar_y = control_window_y()
+    if bar_y is None or bar_y < 1000:
+        raise SystemExit(f"overlay bar not positioned in the lower half (y={bar_y})")
     shot("06-overlay-running")
     print("PASS overlay running")
 
@@ -164,7 +188,7 @@ def main():
     if not gear:
         raise SystemExit("settings gear not found")
     tap(gear)
-    wait_for("Privacy policy")
+    scroll_until("Privacy policy")
     shot("08-settings")
     print("PASS settings privacy entry points")
 
