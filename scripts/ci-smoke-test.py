@@ -35,7 +35,15 @@ def run(*args, check=True, binary=False):
 def dump():
     for _ in range(8):
         run(*ADB, "shell", "rm", "-f", "/sdcard/ui.xml", check=False)
-        out = run(*ADB, "shell", "uiautomator", "dump", "/sdcard/ui.xml", check=False)
+        out = run(
+            *ADB,
+            "shell",
+            "uiautomator",
+            "dump",
+            "--compressed",
+            "/sdcard/ui.xml",
+            check=False,
+        )
         if "ui.xml" in out or "Hierarchy" in out:
             run(*ADB, "pull", "/sdcard/ui.xml", "/tmp/ui.xml", check=False)
             try:
@@ -113,8 +121,9 @@ def scroll_until(text, timeout=40):
         point = find(dump(), text)
         if point:
             return point
-        run(*ADB, "shell", "input", "swipe", "540", "1800", "540", "900", "300")
-        time.sleep(1)
+        # Slow swipe avoids a long fling that keeps the UI non-idle for dumps.
+        run(*ADB, "shell", "input", "swipe", "540", "1800", "540", "900", "800")
+        time.sleep(2)
     label = text.replace(" ", "-").lower()
     shot(f"timeout-{label}")
     raise SystemExit(f"timed out scrolling to {text!r}")
@@ -240,6 +249,10 @@ def main():
     print("PASS overlay stopped")
 
     # Settings: privacy policy + ad privacy entry points.
+    # Disable network so the banner ad fails fast and the UI can go idle for
+    # uiautomator dumps (API 28 WebView ads can keep the hierarchy busy).
+    run(*ADB, "shell", "svc", "wifi", "disable", check=False)
+    run(*ADB, "shell", "svc", "data", "disable", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
     wait_for("Present", timeout=90)
