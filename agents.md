@@ -804,3 +804,19 @@ git switch -c recover-phase-0 checkpoint/phase-0
   app died silently in the background (system memory). Adaptive contrast remains
   UNVERIFIED on this device. Verified-but-complete on-device: overlay launch, bar
   (40dp compact fits width), pass-through, stop/idempotency.
+- 2026-11-18 (launch readiness v1.0.0) — AdMob production IDs wired from env
+  (TELEPROMPTER_APP_ID/BANNER/INTERSTITIAL) via BuildConfig + manifest placeholder;
+  debug always uses Google test units; release build fails without production IDs
+  and keystore.properties. UMP consent flow (ConsentManager) gates all ad requests;
+  privacy options entry point in Settings. Privacy policy published at
+  https://drankit2029-sys.github.io/teleprompter-privacy/ (public repo
+  drankit2029-sys/teleprompter-privacy, GitHub Pages). Private project repo
+  drankit2029-sys/teleprompter. Release signing keystore generated
+  (keystore/teleprompter-upload.jks, credentials in keystore.properties, both
+  gitignored). R8 + resource shrinking enabled; allowBackup=false; cleartext
+  disabled; FileProvider narrowed; MediaProjection + overlay disclosure dialogs;
+  Back no longer triggers interstitials; banner refresh 60s with in-flight guard;
+  capture-specific notification + Stop capture action; share byte-threshold +
+  cache cleanup; main-thread IO removed from repository init. AAB:
+  app/build/outputs/bundle/baseRelease/app-base-release.aab (8.6 MB, signed,
+  versionCode 1, versionName 1.0.0, targetSdk 37).

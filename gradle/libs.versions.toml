@@ -8,7 +8,7 @@ activityCompose = "1.13.0"
 navigationCompose = "2.10.2"
 datastorePreferences = "1.3.0"
 playServicesAds = "25.5.0"
-userMessagingPlatform = "3.2.0"
+userMessagingPlatform = "4.0.0"
 junit = "4.13.2"
 
 [libraries]

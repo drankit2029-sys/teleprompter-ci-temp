@@ -743,14 +743,14 @@ class PrompterOverlayService : Service() {
         noteControlInteraction()
     }
 
-    private fun currentScreenBounds(): Pair<Int, Int> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            bounds.width() to bounds.height()
-        } else {
-            val metrics = overlayContext.resources.displayMetrics
-            metrics.widthPixels to metrics.heightPixels
-        }
+    private fun currentScreenBounds(): Pair<Int, Int> {
+        // The service's WindowManager can report a degenerate/foreign rect for
+        // currentWindowMetrics on some API 30 devices. The display metrics of
+        // the overlay context are authoritative for both the main display and
+        // display contexts created for secondary displays.
+        val metrics = overlayContext.resources.displayMetrics
+        return metrics.widthPixels to metrics.heightPixels
+    }
 
     private fun startProjection(
         resultCode: Int,
