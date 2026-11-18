@@ -33,14 +33,20 @@ def run(*args, check=True, binary=False):
 
 
 def dump():
-    for _ in range(6):
+    for _ in range(8):
+        run(*ADB, "shell", "rm", "-f", "/sdcard/ui.xml", check=False)
         out = run(*ADB, "shell", "uiautomator", "dump", "/sdcard/ui.xml", check=False)
         if "ui.xml" in out or "Hierarchy" in out:
-            break
+            run(*ADB, "pull", "/sdcard/ui.xml", "/tmp/ui.xml", check=False)
+            try:
+                with open("/tmp/ui.xml", encoding="utf-8") as handle:
+                    return handle.read()
+            except FileNotFoundError:
+                pass
+        else:
+            print("dump:", out.strip()[:200])
         time.sleep(2)
-    run(*ADB, "pull", "/sdcard/ui.xml", "/tmp/ui.xml")
-    with open("/tmp/ui.xml", encoding="utf-8") as handle:
-        return handle.read()
+    return ""
 
 
 def find(xml, text):
@@ -131,7 +137,15 @@ def shot(name):
 
 def overlay_windows():
     out = run(*ADB, "shell", "dumpsys", "window", "windows")
-    return out.count("ty=APPLICATION_OVERLAY")
+    count = 0
+    ours = False
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Window #"):
+            ours = PKG in stripped
+        elif "ty=APPLICATION_OVERLAY" in stripped and ours:
+            count += 1
+    return count
 
 
 def overlay_window_lines():
