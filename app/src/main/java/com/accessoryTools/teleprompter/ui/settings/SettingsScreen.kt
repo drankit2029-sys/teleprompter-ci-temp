@@ -4,6 +4,8 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,12 +17,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -34,6 +38,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,7 +49,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.accessoryTools.teleprompter.AppInfo
+import com.accessoryTools.teleprompter.BuildConfig
+import com.accessoryTools.teleprompter.ads.BannerAdSlot
+import com.accessoryTools.teleprompter.ads.ConsentManager
 import com.accessoryTools.teleprompter.prompter.PrompterSession
+import com.accessoryTools.teleprompter.ui.Neo
+import com.accessoryTools.teleprompter.ui.NeoPanel
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -64,6 +75,8 @@ fun SettingsScreen(
     onStopOverlay: () -> Unit,
     onBackup: suspend (Uri) -> Int,
     onRestore: suspend (Uri) -> Int,
+    onOpenPrivacyPolicy: () -> Unit,
+    onShowPrivacyOptions: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -112,25 +125,35 @@ fun SettingsScreen(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = {
+            BannerAdSlot(enabled = !backingUp && !restoring)
+        },
         topBar = {
-            Surface(color = MaterialTheme.colorScheme.surface) {
+            Surface(
+                color = Neo.Yellow,
+                modifier = Modifier.fillMaxWidth().border(3.dp, Neo.Ink),
+            ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth().safeDrawingPadding().padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.background(Neo.Paper).border(3.dp, Neo.Ink),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Neo.Ink)
                     }
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
                         Text(
-                            text = "Settings",
+                            text = "SETTINGS",
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Black,
+                            color = Neo.Ink,
                         )
                         Text(
-                            text = "Reading defaults, overlay, and local backup",
+                            text = "Reading defaults, overlay, backup, and app info",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = Neo.Ink.copy(alpha = 0.72f),
                         )
                     }
                 }
@@ -171,10 +194,14 @@ fun SettingsScreen(
                     },
                     onRestore = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) },
                 )
+                AboutCard(
+                    onOpenPrivacyPolicy = onOpenPrivacyPolicy,
+                    onShowPrivacyOptions = onShowPrivacyOptions,
+                )
                 Text(
                     text =
                         "Teleprompter keeps scripts in app-private storage on this device. " +
-                            "Nothing is uploaded automatically.",
+                            "Scripts stay local; ads are served by Google AdMob in the library and settings.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
@@ -317,23 +344,122 @@ private fun BackupCard(
 }
 
 @Composable
+private fun AboutCard(
+    onOpenPrivacyPolicy: () -> Unit,
+    onShowPrivacyOptions: () -> Unit,
+) {
+    var showPrivacy by remember { mutableStateOf(false) }
+    var showLicenses by remember { mutableStateOf(false) }
+
+    SettingsCard(title = "About") {
+        Text(
+            text = "Teleprompter ${BuildConfig.VERSION_NAME}",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text =
+                "Local-first by design. Scripts, settings, and reading progress stay in " +
+                    "this app's private storage. There are no accounts or analytics. " +
+                    "Ads are served by Google AdMob in the library and settings; ad requests " +
+                    "go to Google over the network.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "Developer: ${AppInfo.DEVELOPER_NAME} · ${AppInfo.CONTACT_EMAIL}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "Imports: TXT, Markdown, HTML, DOCX, ODT, RTF, and clipboard text.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(onClick = onOpenPrivacyPolicy) { Text("Privacy policy") }
+            if (ConsentManager.privacyOptionsRequired) {
+                OutlinedButton(onClick = onShowPrivacyOptions) { Text("Ad privacy options") }
+            }
+            OutlinedButton(onClick = { showPrivacy = true }) { Text("Privacy summary") }
+            OutlinedButton(onClick = { showLicenses = true }) { Text("Licenses") }
+        }
+    }
+
+    if (showPrivacy) {
+        AlertDialog(
+            onDismissRequest = { showPrivacy = false },
+            confirmButton = {
+                TextButton(onClick = { showPrivacy = false }) { Text("Close") }
+            },
+            title = { Text("Privacy") },
+            text = {
+                Text(
+                    "Teleprompter stores scripts, settings, and reading progress only in " +
+                        "this app's private storage on your device. It does not collect " +
+                        "analytics or telemetry, and script text is never sent to an ad " +
+                        "network.\n\n" +
+                        "The library and settings screens request ads from Google AdMob. " +
+                        "AdMob may process device information, approximate location, and " +
+                        "advertising identifiers according to Google's policies " +
+                        "(policies.google.com/technologies/partner-sites). In the EEA, UK, " +
+                        "and Switzerland, personalized ads require your consent, which you " +
+                        "can change at any time via \"Ad privacy options\". No ads are " +
+                        "requested in the editor, while scripts are being saved, or during " +
+                        "prompter, picture-in-picture, and transparent-overlay sessions.\n\n" +
+                        "Backup and export files are written only where you choose. Android " +
+                        "system backup is disabled. The transparent overlay uses Android's " +
+                        "display-over-other-apps permission. Adaptive contrast uses screen " +
+                        "capture only to estimate scene brightness; frames are processed in " +
+                        "memory and are never saved or transmitted.\n\n" +
+                        "Removing the app removes its private scripts. Export a backup first " +
+                        "if you want to keep them. Full policy: ${AppInfo.PRIVACY_POLICY_URL}",
+                )
+            },
+        )
+    }
+
+    if (showLicenses) {
+        AlertDialog(
+            onDismissRequest = { showLicenses = false },
+            confirmButton = {
+                TextButton(onClick = { showLicenses = false }) { Text("Close") }
+            },
+            title = { Text("Licenses") },
+            text = {
+                Text(
+                    "Teleprompter is built with Kotlin, AndroidX, Jetpack Compose, Material " +
+                        "Components, Kotlin Coroutines, and AndroidX DataStore, licensed under " +
+                        "the Apache License 2.0. Material Icons are provided by Google under " +
+                        "the Apache License 2.0.\n\n" +
+                        "The Google Mobile Ads SDK and Google User Messaging Platform are used " +
+                        "under Google's SDK terms.\n\n" +
+                        "Android is a trademark of Google LLC. No analytics or third-party " +
+                        "tracking SDKs are included.",
+                )
+            },
+        )
+    }
+}
+
+@Composable
 private fun SettingsCard(
     title: String,
     content: @Composable () -> Unit,
 ) {
-    Surface(
+    NeoPanel(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
+        color = Neo.White,
+        contentPadding = 18.dp,
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = title,
+                text = title.uppercase(),
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Black,
             )
             content()
         }

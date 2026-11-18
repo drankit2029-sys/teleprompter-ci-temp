@@ -3,6 +3,30 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+// AdMob credentials come from the environment so production IDs never live in git.
+// Debug builds always use Google's official test units (safe for development and
+// emulator testing); release builds require the real IDs and fail otherwise.
+def testAdmobAppId = 'ca-app-pub-3940256099942544~3347511713'
+def testAdmobBannerId = 'ca-app-pub-3940256099942544/9214589741'
+def testAdmobInterstitialId = 'ca-app-pub-3940256099942544/1033173712'
+def envAdmobAppId = (System.getenv('TELEPROMPTER_APP_ID') ?: '').trim()
+def envAdmobBannerId = (System.getenv('TELEPROMPTER_BANNER') ?: '').trim()
+def envAdmobInterstitialId = (System.getenv('TELEPROMPTER_INTERSTITIAL') ?: '').trim()
+def hasProductionAds =
+    envAdmobAppId &&
+        !envAdmobAppId.contains('3940256099942544') &&
+        envAdmobBannerId &&
+        envAdmobInterstitialId
+def releaseAdmobAppId = hasProductionAds ? envAdmobAppId : testAdmobAppId
+def releaseAdmobBannerId = hasProductionAds ? envAdmobBannerId : testAdmobBannerId
+def releaseAdmobInterstitialId = hasProductionAds ? envAdmobInterstitialId : testAdmobInterstitialId
+
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
 android {
     namespace = 'com.accessoryTools.teleprompter'
     compileSdk = 37
@@ -10,13 +34,80 @@ android {
     compileSdkMinor = 1
     buildToolsVersion = '37.0.0'
 
+    flavorDimensions 'agent'
+    productFlavors {
+        base {
+            dimension 'agent'
+        }
+        agentOne {
+            dimension 'agent'
+            applicationIdSuffix '.agent1'
+            buildConfigField 'boolean', 'AD_FREE', 'true'
+        }
+        agentTwo {
+            dimension 'agent'
+            applicationIdSuffix '.agent2'
+            buildConfigField 'boolean', 'AD_FREE', 'true'
+        }
+        agentThree {
+            dimension 'agent'
+            applicationIdSuffix '.agent3'
+            buildConfigField 'boolean', 'AD_FREE', 'true'
+        }
+        agentFour {
+            dimension 'agent'
+            applicationIdSuffix '.agent4'
+            buildConfigField 'boolean', 'AD_FREE', 'true'
+        }
+    }
+
     defaultConfig {
         applicationId = 'com.accessoryTools.teleprompter'
         minSdk = 28
         targetSdk = 37
         versionCode = 1
         versionName = '1.0.0'
+        // Screenshot/verification builds (the agent flavors) run ad-free so
+        // captures of the app are clean. The base flavor keeps ads.
+        buildConfigField 'boolean', 'AD_FREE', 'false'
+        // Safe defaults: Google's official test units. The release build type
+        // overrides these with the environment-provided production IDs.
+        buildConfigField 'String', 'ADMOB_APP_ID', "\"$testAdmobAppId\""
+        buildConfigField 'String', 'ADMOB_BANNER_ID', "\"$testAdmobBannerId\""
+        buildConfigField 'String', 'ADMOB_INTERSTITIAL_ID', "\"$testAdmobInterstitialId\""
+        manifestPlaceholders = [admobAppId: testAdmobAppId]
+    }
 
+    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Never use production ad units in debug builds: development taps
+            // would count as invalid traffic.
+            buildConfigField 'String', 'ADMOB_APP_ID', "\"$testAdmobAppId\""
+            buildConfigField 'String', 'ADMOB_BANNER_ID', "\"$testAdmobBannerId\""
+            buildConfigField 'String', 'ADMOB_INTERSTITIAL_ID', "\"$testAdmobInterstitialId\""
+            manifestPlaceholders = [admobAppId: testAdmobAppId]
+        }
+        release {
+            buildConfigField 'String', 'ADMOB_APP_ID', "\"$releaseAdmobAppId\""
+            buildConfigField 'String', 'ADMOB_BANNER_ID', "\"$releaseAdmobBannerId\""
+            buildConfigField 'String', 'ADMOB_INTERSTITIAL_ID', "\"$releaseAdmobInterstitialId\""
+            manifestPlaceholders = [admobAppId: releaseAdmobAppId]
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
     }
 
     buildFeatures {
@@ -45,6 +136,39 @@ android {
     }
 }
 
+// The agent flavors exist only for screenshot/verification builds; never ship
+// them as release artifacts.
+androidComponents {
+    beforeVariants(selector().all()) { variantBuilder ->
+        def agentFlavor = variantBuilder.productFlavors.any { it.second.startsWith('agent') }
+        if (agentFlavor && variantBuilder.buildType == 'release') {
+            variantBuilder.enable = false
+        }
+    }
+}
+
+// Hard gate: a release build must have production AdMob IDs and an upload key.
+gradle.taskGraph.whenReady { graph ->
+    def releaseBuild =
+        graph.allTasks.any { task ->
+            task.name == 'assembleBaseRelease' || task.name == 'bundleBaseRelease'
+        }
+    if (releaseBuild) {
+        if (!hasProductionAds) {
+            throw new GradleException(
+                'Release build requires TELEPROMPTER_APP_ID, TELEPROMPTER_BANNER and ' +
+                    'TELEPROMPTER_INTERSTITIAL environment variables with production AdMob IDs.',
+            )
+        }
+        if (!keystorePropertiesFile.exists()) {
+            throw new GradleException(
+                'Release build requires keystore.properties (storeFile, storePassword, ' +
+                    'keyAlias, keyPassword) pointing at the upload keystore.',
+            )
+        }
+    }
+}
+
 dependencies {
     implementation libs.androidx.core.ktx
     implementation libs.androidx.lifecycle.runtime.ktx
@@ -57,5 +181,8 @@ dependencies {
     implementation libs.androidx.compose.ui.tooling.preview
     implementation libs.androidx.compose.material3
     implementation libs.androidx.compose.material.icons.core
+    implementation libs.play.services.ads
+    implementation libs.user.messaging.platform
 
+    testImplementation libs.junit
 }

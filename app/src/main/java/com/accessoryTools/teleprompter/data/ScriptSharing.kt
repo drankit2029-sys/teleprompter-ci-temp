@@ -9,11 +9,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
+private const val SHARE_STREAM_THRESHOLD_BYTES = 200_000
+
 object ScriptSharing {
-    fun shareText(
+    suspend fun shareText(
         context: Context,
         script: Script,
     ) {
+        val byteSize = script.content.toByteArray(Charsets.UTF_8).size
+        if (byteSize > SHARE_STREAM_THRESHOLD_BYTES) {
+            // Binder transactions cap at ~1 MB of payload; keep large scripts out of EXTRA_TEXT.
+            shareFile(context, script, markdown = false)
+            return
+        }
         val intent =
             Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
@@ -23,20 +31,6 @@ object ScriptSharing {
         context.startActivity(
             Intent.createChooser(intent, "Share script").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
-    }
-
-    fun shareMarkdown(
-        context: Context,
-        script: Script,
-    ) {
-        shareFile(context, script, markdown = true)
-    }
-
-    fun sharePlainFile(
-        context: Context,
-        script: Script,
-    ) {
-        shareFile(context, script, markdown = false)
     }
 
     suspend fun export(
@@ -54,14 +48,12 @@ object ScriptSharing {
         }
     }
 
-    fun markdownText(script: Script): String = markdownText(script.title, script.content)
-
     fun markdownText(
         title: String,
         content: String,
     ): String = if (content.trimStart().startsWith("# ")) content else "# $title\n\n$content"
 
-    private fun shareFile(
+    private suspend fun shareFile(
         context: Context,
         script: Script,
         markdown: Boolean,
@@ -69,7 +61,9 @@ object ScriptSharing {
         val extension = if (markdown) "md" else "txt"
         val directory = File(context.cacheDir, "exports").apply { mkdirs() }
         val file = File(directory, "${safeFileName(script.title)}.$extension")
-        file.writeText(if (markdown) markdownText(script) else script.content)
+        withContext(Dispatchers.IO) {
+            file.writeText(if (markdown) markdownText(script.title, script.content) else script.content)
+        }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val intent =
             Intent(Intent.ACTION_SEND).apply {
@@ -91,4 +85,11 @@ object ScriptSharing {
             .replace(Regex("\\s+"), " ")
             .take(60)
             .ifBlank { "script" }
+
+    /** Removes stale share/export copies from the cache on app start. */
+    fun clearExports(context: Context) {
+        runCatching {
+            File(context.cacheDir, "exports").listFiles()?.forEach { it.delete() }
+        }
+    }
 }

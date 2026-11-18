@@ -11,9 +11,6 @@ import org.xmlpull.v1.XmlPullParser
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
-import java.nio.ByteBuffer
-import java.nio.charset.Charset
-import java.nio.charset.CodingErrorAction
 import java.util.zip.ZipInputStream
 
 data class ImportedDocument(
@@ -63,17 +60,15 @@ object ScriptImporter {
                     }
 
                     extension == "html" || extension == "htm" || mimeType == "text/html" -> {
-                        extractHtml(decodeText(bytes))
+                        extractHtml(DocumentText.decode(bytes))
                     }
 
                     extension == "rtf" || mimeType == "application/rtf" -> {
-                        throw ScriptImportException(
-                            "RTF import is not available yet. Save the file as .txt or .docx.",
-                        )
+                        DocumentText.extractRtf(bytes)
                     }
 
                     else -> {
-                        decodeText(bytes)
+                        DocumentText.decode(bytes)
                     }
                 }
 
@@ -127,41 +122,6 @@ object ScriptImporter {
             }
         return withoutExtension.trim().take(120).ifBlank { "Imported script" }
     }
-
-    private fun decodeText(bytes: ByteArray): String {
-        val charset =
-            when {
-                bytes.startsWith(UTF8_BOM) -> {
-                    Charsets.UTF_8
-                }
-
-                bytes.startsWith(UTF16_LE_BOM) -> {
-                    Charsets.UTF_16LE
-                }
-
-                bytes.startsWith(UTF16_BE_BOM) -> {
-                    Charsets.UTF_16BE
-                }
-
-                isStrictUtf8(bytes) -> {
-                    Charsets.UTF_8
-                }
-
-                else -> {
-                    runCatching { Charset.forName("windows-1252") }.getOrDefault(Charsets.ISO_8859_1)
-                }
-            }
-        return bytes.toString(charset).removePrefix("\uFEFF")
-    }
-
-    private fun isStrictUtf8(bytes: ByteArray): Boolean =
-        runCatching {
-            Charsets.UTF_8
-                .newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(bytes))
-        }.isSuccess
 
     private fun extractWordDocument(bytes: ByteArray): String {
         val xml = zipEntry(bytes, "word/document.xml")
@@ -257,20 +217,10 @@ object ScriptImporter {
         return output.toByteArray()
     }
 
-    private fun ByteArray.startsWith(prefix: ByteArray): Boolean {
-        if (size < prefix.size) {
-            return false
-        }
-        return prefix.indices.all { this[it] == prefix[it] }
-    }
-
     private const val MAX_IMPORT_BYTES = 25 * 1024 * 1024
     private const val MAX_DOCUMENT_XML_BYTES = 20 * 1024 * 1024
     private const val MAX_ZIP_ENTRIES = 5_000
     private const val DOCX_MIME =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     private const val ODT_MIME = "application/vnd.oasis.opendocument.text"
-    private val UTF8_BOM = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
-    private val UTF16_LE_BOM = byteArrayOf(0xFF.toByte(), 0xFE.toByte())
-    private val UTF16_BE_BOM = byteArrayOf(0xFE.toByte(), 0xFF.toByte())
 }

@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -27,19 +26,20 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.DeviceFontFamilyName
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.Hyphens
 import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.accessoryTools.teleprompter.data.StageAlignment
 import com.accessoryTools.teleprompter.data.StageFont
 import com.accessoryTools.teleprompter.data.StageWeight
 import com.accessoryTools.teleprompter.data.argb
-import kotlin.math.roundToInt
+import kotlin.math.min
 
 @Composable
 fun PrompterStage(
@@ -50,7 +50,7 @@ fun PrompterStage(
         modifier =
             modifier
                 .fillMaxSize()
-                .background(Color(PrompterSession.backgroundPreset.argb))
+                .background(Color(PrompterSession.effectiveBackgroundArgb))
                 .clipToBounds(),
     ) {
         val density = LocalDensity.current
@@ -70,10 +70,64 @@ fun PrompterStage(
         val textColor = Color(PrompterSession.effectiveTextColorArgb)
         val outlineColor = Color(PrompterSession.effectiveOutlineColorArgb)
         val fontFamily =
-            when (PrompterSession.stageFont) {
-                StageFont.SANS -> FontFamily.SansSerif
-                StageFont.SERIF -> FontFamily.Serif
-                StageFont.MONO -> FontFamily.Monospace
+            remember(PrompterSession.stageFont, PrompterSession.stageWeight, PrompterSession.customFontFile) {
+                val weight =
+                    when (PrompterSession.stageWeight) {
+                        StageWeight.REGULAR -> FontWeight.Normal
+                        StageWeight.MEDIUM -> FontWeight.Medium
+                        StageWeight.BOLD -> FontWeight.Bold
+                    }
+                when (PrompterSession.stageFont) {
+                    StageFont.SANS -> {
+                        FontFamily.SansSerif
+                    }
+
+                    StageFont.SERIF -> {
+                        FontFamily.Serif
+                    }
+
+                    StageFont.MONO -> {
+                        FontFamily.Monospace
+                    }
+
+                    StageFont.SANS_LIGHT -> {
+                        FontFamily(Font(DeviceFontFamilyName("sans-serif-light"), weight))
+                    }
+
+                    StageFont.SANS_MEDIUM -> {
+                        FontFamily(Font(DeviceFontFamilyName("sans-serif-medium"), weight))
+                    }
+
+                    StageFont.SANS_CONDENSED -> {
+                        FontFamily(Font(DeviceFontFamilyName("sans-serif-condensed"), weight))
+                    }
+
+                    StageFont.SANS_SMALLCAPS -> {
+                        FontFamily(Font(DeviceFontFamilyName("sans-serif-smallcaps"), weight))
+                    }
+
+                    StageFont.SERIF_MEDIUM -> {
+                        FontFamily(Font(DeviceFontFamilyName("serif-medium"), weight))
+                    }
+
+                    StageFont.CURSIVE -> {
+                        FontFamily(Font(DeviceFontFamilyName("cursive"), weight))
+                    }
+
+                    StageFont.CASUAL -> {
+                        FontFamily(Font(DeviceFontFamilyName("casual"), weight))
+                    }
+
+                    StageFont.CUSTOM -> {
+                        val name = PrompterSession.customFontFile
+                        val file = if (name != null) StageTypefaces.fontFile(name) else null
+                        if (file != null && file.isFile) {
+                            FontFamily(Font(file, weight))
+                        } else {
+                            FontFamily.SansSerif
+                        }
+                    }
+                }
             }
         val fontWeight =
             when (PrompterSession.stageWeight) {
@@ -85,28 +139,26 @@ fun PrompterStage(
             when (PrompterSession.stageAlignment) {
                 StageAlignment.CENTER -> TextAlign.Center
                 StageAlignment.LEFT -> TextAlign.Left
+                StageAlignment.RIGHT -> TextAlign.Right
             }
         val lineSpacing = PrompterSession.lineSpacing
         val mirrorHorizontal = PrompterSession.mirrorHorizontal
         val mirrorVertical = PrompterSession.mirrorVertical
         val maskBrush =
             remember(edgeAlpha, focus, mirrorHorizontal, mirrorVertical) {
-                val band = 0.09f
-                Brush.verticalGradient(
-                    colorStops =
-                        arrayOf(
-                            0f to Color.Black.copy(alpha = edgeAlpha),
-                            (focus - band).coerceIn(0f, 1f) to Color.Black,
-                            (focus + band).coerceIn(0f, 1f) to Color.Black,
-                            1f to Color.Black.copy(alpha = edgeAlpha),
-                        ),
-                )
+                val stops =
+                    PrompterMath
+                        .focusGradientStops(edgeAlpha, focus)
+                        .map { (position, alpha) ->
+                            position to Color.Black.copy(alpha = alpha)
+                        }.toTypedArray()
+                Brush.verticalGradient(colorStops = stops)
             }
         val textStyle =
             remember(fontSizeSp, lineSpacing, outlineColor, fontFamily, fontWeight, textAlign) {
                 TextStyle(
                     fontSize = fontSizeSp.sp,
-                    lineHeight = (fontSizeSp * lineSpacing).sp,
+                    // Platform default, matching the StaticLayout multiplier in the overlay.
                     fontFamily = fontFamily,
                     fontWeight = fontWeight,
                     textAlign = textAlign,
@@ -120,7 +172,43 @@ fun PrompterStage(
                         ),
                 )
             }
-        val offsetYPx = (focusYPx - PrompterSession.offsetPx).roundToInt()
+        val availableTextWidthPx =
+            (
+                min(constraints.maxWidth.toFloat(), with(density) { maxTextWidth.toPx() }) -
+                    with(density) { sidePadding.toPx() } * 2f
+            ).coerceAtLeast(1f)
+        val wrappedScript =
+            remember(
+                PrompterSession.script,
+                fontSizeSp,
+                PrompterSession.stageFont,
+                PrompterSession.stageWeight,
+                PrompterSession.customFontFile,
+                availableTextWidthPx,
+                density.density,
+                density.fontScale,
+            ) {
+                val paint =
+                    android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        typeface =
+                            StageTypefaces.typefaceFor(
+                                PrompterSession.stageFont,
+                                PrompterSession.stageWeight,
+                                PrompterSession.customFontFile,
+                            )
+                        textSize = fontSizeSp * density.density * density.fontScale
+                        isFakeBoldText =
+                            PrompterSession.stageWeight == com.accessoryTools.teleprompter.data.StageWeight.BOLD
+                    }
+                // Leave a small safety margin so Compose cannot decide to
+                // re-wrap a line that the explicit measurement considered a
+                // perfect fit.
+                WordWrap.wrap(
+                    text = PrompterSession.script,
+                    maxWidth = (availableTextWidthPx - 1f).coerceAtLeast(1f),
+                    measure = { value -> paint.measureText(value, 0, value.length) },
+                )
+            }
         with(density) {
             Box(
                 modifier =
@@ -145,7 +233,12 @@ fun PrompterStage(
                             .widthIn(max = maxTextWidth)
                             .fillMaxWidth()
                             .wrapContentHeight(unbounded = true, align = Alignment.Top)
-                            .offset { IntOffset(0, offsetYPx) }
+                            // Translate the (static) text layer instead of
+                            // relaying out the huge Text every frame; the
+                            // layer records once and merely shifts.
+                            .graphicsLayer {
+                                translationY = focusYPx - PrompterSession.offsetPx
+                            }
                             .onGloballyPositioned { coordinates ->
                                 PrompterSession.updateLayout(
                                     contentHeight = coordinates.size.height.toFloat(),
@@ -154,9 +247,10 @@ fun PrompterStage(
                             }.padding(horizontal = sidePadding),
                 ) {
                     Text(
-                        text = PrompterSession.script,
+                        text = wrappedScript,
                         color = textColor,
                         style = textStyle,
+                        softWrap = false,
                     )
                 }
             }

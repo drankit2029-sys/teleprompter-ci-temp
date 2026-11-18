@@ -4,25 +4,36 @@ import android.net.Uri
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -36,6 +47,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -51,10 +63,8 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -68,12 +78,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.accessoryTools.teleprompter.ads.BannerAdSlot
 import com.accessoryTools.teleprompter.data.LibrarySort
 import com.accessoryTools.teleprompter.data.Script
+import com.accessoryTools.teleprompter.ui.isCompactHeightScreen
+import com.accessoryTools.teleprompter.ui.isCompactWidthScreen
+import com.accessoryTools.teleprompter.ui.isShortLandscape
 import com.accessoryTools.teleprompter.data.ScriptImportException
 import com.accessoryTools.teleprompter.data.formatDuration
 import com.accessoryTools.teleprompter.data.readingSeconds
 import com.accessoryTools.teleprompter.prompter.PrompterSession
+import com.accessoryTools.teleprompter.ui.Neo
+import com.accessoryTools.teleprompter.ui.NeoPanel
 import kotlinx.coroutines.launch
 
 private val LibraryWideBreakpoint = 760.dp
@@ -97,7 +113,7 @@ fun LibraryScreen(
     onDelete: (Script) -> Unit,
     onRestore: (String) -> Unit,
     onSettings: () -> Unit,
-    onImportUris: suspend (List<Uri>) -> Int,
+    onImportUris: suspend (List<Uri>) -> Pair<Int, List<String>>,
     onImportClipboard: suspend () -> Boolean,
 ) {
     val scope = rememberCoroutineScope()
@@ -145,10 +161,19 @@ fun LibraryScreen(
                 scope.launch {
                     importing = true
                     runCatching { onImportUris(uris) }
-                        .onSuccess { count ->
-                            snackbarHostState.showSnackbar(
-                                if (count == 1) "Imported 1 script" else "Imported $count scripts",
-                            )
+                        .onSuccess { (count, failed) ->
+                            if (count > 0) {
+                                snackbarHostState.showSnackbar(
+                                    if (count == 1) "Imported 1 script" else "Imported $count scripts",
+                                )
+                            }
+                            if (failed.isNotEmpty()) {
+                                snackbarHostState.showSnackbar(
+                                    "Could not import: ${failed.joinToString()}",
+                                )
+                            } else if (count == 0) {
+                                snackbarHostState.showSnackbar("Could not import the selected file(s).")
+                            }
                         }.onFailure(::showError)
                     importing = false
                 }
@@ -159,11 +184,9 @@ fun LibraryScreen(
         importLauncher.launch(
             arrayOf(
                 "text/*",
-                "application/msword",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "application/vnd.oasis.opendocument.text",
                 "application/rtf",
-                "application/pdf",
                 "text/html",
                 "text/markdown",
                 "application/octet-stream",
@@ -199,17 +222,33 @@ fun LibraryScreen(
         }
     }
 
+    val shortLandscape = isShortLandscape()
+    val compactHeight = isCompactHeightScreen()
+    val compactWidth = isCompactWidthScreen()
+    val gridState = rememberLazyGridState()
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onNewScript,
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text("New script") },
+        bottomBar = {
+            BannerAdSlot(
+                enabled = !loading && !importing && !pasting,
+                rotationDeferred = gridState.isScrollInProgress,
             )
+        },
+        floatingActionButton = {
+            if (!shortLandscape && !compactHeight && !compactWidth) {
+                ExtendedFloatingActionButton(
+                    onClick = onNewScript,
+                    modifier = Modifier.border(3.dp, Neo.Ink),
+                    containerColor = Neo.Yellow,
+                    contentColor = Neo.Ink,
+                    shape = RoundedCornerShape(0.dp),
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text("New script") },
+                )
+            }
         },
     ) { innerPadding ->
         Box(
@@ -226,79 +265,275 @@ fun LibraryScreen(
                         .widthIn(max = LibraryMaxWidth),
             ) {
                 val wide = maxWidth >= LibraryWideBreakpoint
-                Column(modifier = Modifier.fillMaxSize()) {
-                    LibraryHeader(
-                        scriptCount = scripts.size,
-                        onSettings = onSettings,
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = if (wide) 28.dp else 16.dp)
-                                .padding(top = 20.dp),
-                    )
-                    Spacer(modifier = Modifier.height(18.dp))
-                    LibraryToolbar(
-                        query = query,
-                        onQueryChange = { query = it },
-                        favoritesOnly = favoritesOnly,
-                        onFavoritesChange = {
-                            favoritesOnly = it
-                            onFavoritesChanged(it)
-                        },
-                        sortOrder = sortOrder,
-                        sortMenuOpen = sortMenuOpen,
-                        onSortMenuOpenChange = { sortMenuOpen = it },
-                        onSortSelected = {
-                            sortOrder = it
-                            onSortChanged(it)
-                            sortMenuOpen = false
-                        },
-                        importing = importing,
-                        pasting = pasting,
-                        onImport = ::startImport,
-                        onPaste = ::startPaste,
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = if (wide) 28.dp else 16.dp),
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    when {
-                        loading -> {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator()
+                val compactHeader = maxWidth < 420.dp
+                val landscape = maxWidth > maxHeight
+                val landscapeCardMin = 280.dp
+                val topPad = if (landscape) 12.dp else 20.dp
+                val sidePad =
+                    if (wide) {
+                        28.dp
+                    } else if (landscape) {
+                        12.dp
+                    } else {
+                        16.dp
+                    }
+                if (shortLandscape) {
+                    // Short handset landscape: fixed control rail on the left, cards on the
+                    // right. Gives the grid almost the full height budget.
+                    Row(modifier = Modifier.fillMaxSize()) {
+                        Column(
+                            modifier =
+                                Modifier
+                                    .width(300.dp)
+                                    .fillMaxHeight()
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            LibraryHeader(
+                                scriptCount = scripts.size,
+                                onSettings = onSettings,
+                                compact = true,
+                            )
+                            NeoPanel(color = Neo.White, contentPadding = 12.dp) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedTextField(
+                                        value = query,
+                                        onValueChange = { query = it },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                        shape = MaterialTheme.shapes.large,
+                                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                        placeholder = { Text("Search") },
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        FilterChip(
+                                            selected = favoritesOnly,
+                                            onClick = {
+                                                favoritesOnly = !favoritesOnly
+                                                onFavoritesChanged(favoritesOnly)
+                                            },
+                                            label = { Text("Favorites") },
+                                            leadingIcon = {
+                                                Icon(
+                                                    if (favoritesOnly) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp),
+                                                )
+                                            },
+                                        )
+                                        Box {
+                                            TextButton(onClick = { sortMenuOpen = true }) {
+                                                Text(sortOrder.label, maxLines = 1)
+                                                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                            }
+                                            DropdownMenu(
+                                                expanded = sortMenuOpen,
+                                                onDismissRequest = { sortMenuOpen = false },
+                                            ) {
+                                                LibrarySort.entries.forEach { option ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(option.label) },
+                                                        onClick = {
+                                                            sortOrder = option
+                                                            onSortChanged(option)
+                                                            sortMenuOpen = false
+                                                        },
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = ::startImport,
+                                            enabled = !importing,
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            if (importing) {
+                                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                            } else {
+                                                Text("Import")
+                                            }
+                                        }
+                                        OutlinedButton(
+                                            onClick = ::startPaste,
+                                            enabled = !pasting,
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            if (pasting) {
+                                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                            } else {
+                                                Text("Paste")
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                        }
-
-                        filtered.isEmpty() -> {
-                            EmptyLibrary(
-                                query = query,
-                                favoritesOnly = favoritesOnly,
-                                hasScripts = scripts.isNotEmpty(),
-                                onCreate = onNewScript,
-                                onImport = ::startImport,
-                                onPaste = ::startPaste,
+                            Button(
+                                onClick = onNewScript,
                                 modifier =
                                     Modifier
-                                        .fillMaxSize()
-                                        .padding(horizontal = if (wide) 28.dp else 16.dp),
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .border(3.dp, Neo.Ink),
+                                shape = RoundedCornerShape(0.dp),
+                                colors =
+                                    ButtonDefaults.buttonColors(
+                                        containerColor = Neo.Yellow,
+                                        contentColor = Neo.Ink,
+                                    ),
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null)
+                                Spacer(modifier = Modifier.widthIn(min = 4.dp))
+                                Text("New script", fontWeight = FontWeight.Black)
+                            }
+                        }
+                        LazyVerticalGrid(
+                            state = gridState,
+                            columns = GridCells.Adaptive(minSize = 232.dp),
+                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                            contentPadding =
+                                PaddingValues(
+                                    start = 2.dp,
+                                    end = 10.dp,
+                                    top = 10.dp,
+                                    bottom = 92.dp,
+                                ),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            when {
+                                loading -> {
+                                    item(span = { GridItemSpan(maxLineSpan) }) {
+                                        Box(
+                                            modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            CircularProgressIndicator()
+                                        }
+                                    }
+                                }
+
+                                filtered.isEmpty() -> {
+                                    item(span = { GridItemSpan(maxLineSpan) }) {
+                                        EmptyLibrary(
+                                            query = query,
+                                            favoritesOnly = favoritesOnly,
+                                            hasScripts = scripts.isNotEmpty(),
+                                            onCreate = onNewScript,
+                                            onImport = ::startImport,
+                                            onPaste = ::startPaste,
+                                            modifier =
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .heightIn(min = 200.dp),
+                                        )
+                                    }
+                                }
+
+                                else -> {
+                                    items(filtered, key = { script -> script.id }) { script ->
+                                        ScriptCard(
+                                            script = script,
+                                            onOpen = { onOpenScript(script.id) },
+                                            onPresent = { onPresent(script) },
+                                            onToggleFavorite = { onToggleFavorite(script) },
+                                            onDuplicate = { onDuplicate(script) },
+                                            onShare = { onShare(script) },
+                                            onDelete = { deleteWithUndo(script) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (landscape) {
+                    LazyVerticalGrid(
+                        state = gridState,
+                        columns = GridCells.Adaptive(minSize = landscapeCardMin),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding =
+                            PaddingValues(
+                                start = 10.dp,
+                                end = 10.dp,
+                                top = 10.dp,
+                                bottom = 96.dp,
+                            ),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            LibraryHeader(
+                                scriptCount = scripts.size,
+                                onSettings = onSettings,
+                                compact = true,
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = sidePad)
+                                        .padding(top = if (landscape) 2.dp else topPad),
                             )
                         }
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            LibraryToolbar(
+                                query = query,
+                                onQueryChange = { query = it },
+                                favoritesOnly = favoritesOnly,
+                                onFavoritesChange = {
+                                    favoritesOnly = it
+                                    onFavoritesChanged(it)
+                                },
+                                sortOrder = sortOrder,
+                                sortMenuOpen = sortMenuOpen,
+                                onSortMenuOpenChange = { sortMenuOpen = it },
+                                onSortSelected = {
+                                    sortOrder = it
+                                    onSortChanged(it)
+                                    sortMenuOpen = false
+                                },
+                                importing = importing,
+                                pasting = pasting,
+                                onImport = ::startImport,
+                                onPaste = ::startPaste,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = sidePad),
+                                onCreate = if (compactHeight || compactWidth) onNewScript else null,
+                            )
+                        }
+                        when {
+                            loading -> {
+                                item(span = { GridItemSpan(maxLineSpan) }) {
+                                    Box(
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        CircularProgressIndicator()
+                                    }
+                                }
+                            }
 
-                        else -> {
-                            LazyVerticalGrid(
-                                columns = GridCells.Adaptive(minSize = CardMinWidth),
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding =
-                                    PaddingValues(
-                                        start = if (wide) 28.dp else 16.dp,
-                                        end = if (wide) 28.dp else 16.dp,
-                                        top = 4.dp,
-                                        bottom = 112.dp,
-                                    ),
-                                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp),
-                            ) {
+                            filtered.isEmpty() -> {
+                                item(span = { GridItemSpan(maxLineSpan) }) {
+                                    EmptyLibrary(
+                                        query = query,
+                                        favoritesOnly = favoritesOnly,
+                                        hasScripts = scripts.isNotEmpty(),
+                                        onCreate = onNewScript,
+                                        onImport = ::startImport,
+                                        onPaste = ::startPaste,
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
+                                    )
+                                }
+                            }
+
+                            else -> {
                                 items(filtered, key = { script -> script.id }) { script ->
                                     ScriptCard(
                                         script = script,
@@ -313,6 +548,98 @@ fun LibraryScreen(
                             }
                         }
                     }
+                } else {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        LibraryHeader(
+                            scriptCount = scripts.size,
+                            onSettings = onSettings,
+                            compact = compactHeader,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = sidePad)
+                                    .padding(top = topPad),
+                        )
+                        Spacer(modifier = Modifier.height(18.dp))
+                        LibraryToolbar(
+                            query = query,
+                            onQueryChange = { query = it },
+                            favoritesOnly = favoritesOnly,
+                            onFavoritesChange = {
+                                favoritesOnly = it
+                                onFavoritesChanged(it)
+                            },
+                            sortOrder = sortOrder,
+                            sortMenuOpen = sortMenuOpen,
+                            onSortMenuOpenChange = { sortMenuOpen = it },
+                            onSortSelected = {
+                                sortOrder = it
+                                onSortChanged(it)
+                                sortMenuOpen = false
+                            },
+                            importing = importing,
+                            pasting = pasting,
+                            onImport = ::startImport,
+                            onPaste = ::startPaste,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = if (wide) 28.dp else 16.dp),
+                            onCreate = if (compactHeight || compactWidth) onNewScript else null,
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        when {
+                            loading -> {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator()
+                                }
+                            }
+
+                            filtered.isEmpty() -> {
+                                EmptyLibrary(
+                                    query = query,
+                                    favoritesOnly = favoritesOnly,
+                                    hasScripts = scripts.isNotEmpty(),
+                                    onCreate = onNewScript,
+                                    onImport = ::startImport,
+                                    onPaste = ::startPaste,
+                                    modifier =
+                                        Modifier
+                                            .fillMaxSize()
+                                            .padding(horizontal = if (wide) 28.dp else 16.dp),
+                                )
+                            }
+
+                            else -> {
+                                LazyVerticalGrid(
+                                    state = gridState,
+                                    columns = GridCells.Adaptive(minSize = CardMinWidth),
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentPadding =
+                                        PaddingValues(
+                                            start = if (wide) 28.dp else 16.dp,
+                                            end = if (wide) 28.dp else 16.dp,
+                                            top = 4.dp,
+                                            bottom = 112.dp,
+                                        ),
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                                ) {
+                                    items(filtered, key = { script -> script.id }) { script ->
+                                        ScriptCard(
+                                            script = script,
+                                            onOpen = { onOpenScript(script.id) },
+                                            onPresent = { onPresent(script) },
+                                            onToggleFavorite = { onToggleFavorite(script) },
+                                            onDuplicate = { onDuplicate(script) },
+                                            onShare = { onShare(script) },
+                                            onDelete = { deleteWithUndo(script) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -323,33 +650,54 @@ fun LibraryScreen(
 private fun LibraryHeader(
     scriptCount: Int,
     onSettings: () -> Unit,
+    compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    NeoPanel(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        color = Neo.Yellow,
+        contentPadding = if (compact) 10.dp else 16.dp,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "Teleprompter",
-                style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            Text(
-                text =
-                    when (scriptCount) {
-                        0 -> "Your local script library"
-                        1 -> "1 script stored on this device"
-                        else -> "$scriptCount scripts stored on this device"
-                    },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        IconButton(onClick = onSettings, modifier = Modifier.size(48.dp)) {
-            Icon(Icons.Default.Settings, contentDescription = "Settings")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "TELEPROMPTER",
+                    style =
+                        if (compact) {
+                            MaterialTheme.typography.headlineSmall
+                        } else {
+                            MaterialTheme.typography.headlineLarge
+                        },
+                    fontWeight = FontWeight.Black,
+                    color = Neo.Ink,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text =
+                        when (scriptCount) {
+                            0 -> "Your local script library"
+                            1 -> "1 script stored on this device"
+                            else -> "$scriptCount scripts stored on this device"
+                        },
+                    style = if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
+                    color = Neo.Ink.copy(alpha = 0.72f),
+                )
+            }
+            IconButton(
+                onClick = onSettings,
+                modifier =
+                    Modifier
+                        .size(if (compact) 44.dp else 48.dp)
+                        .background(Neo.Paper)
+                        .border(3.dp, Neo.Ink),
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Neo.Ink)
+            }
         }
     }
 }
@@ -369,81 +717,130 @@ private fun LibraryToolbar(
     onImport: () -> Unit,
     onPaste: () -> Unit,
     modifier: Modifier = Modifier,
+    onCreate: (() -> Unit)? = null,
 ) {
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = onQueryChange,
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            shape = MaterialTheme.shapes.large,
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            placeholder = { Text("Search titles and scripts") },
-        )
-        Row(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            FilterChip(
-                selected = favoritesOnly,
-                onClick = { onFavoritesChange(!favoritesOnly) },
-                label = { Text("Favorites") },
-                leadingIcon =
-                    if (favoritesOnly) {
-                        {
-                            Icon(
-                                Icons.Default.Favorite,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                    } else {
-                        {
-                            Icon(
-                                Icons.Default.FavoriteBorder,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                    },
+    NeoPanel(
+        modifier = modifier,
+        color = Neo.White,
+        contentPadding = 12.dp,
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = MaterialTheme.shapes.large,
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                placeholder = { Text("Search titles and scripts") },
             )
-            Box {
-                TextButton(onClick = { onSortMenuOpenChange(true) }) {
-                    Text(sortOrder.label)
-                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                }
-                DropdownMenu(
-                    expanded = sortMenuOpen,
-                    onDismissRequest = { onSortMenuOpenChange(false) },
-                ) {
-                    LibrarySort.entries.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option.label) },
-                            onClick = { onSortSelected(option) },
-                        )
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = favoritesOnly,
+                    onClick = { onFavoritesChange(!favoritesOnly) },
+                    label = { Text("Favorites") },
+                    leadingIcon =
+                        if (favoritesOnly) {
+                            {
+                                Icon(
+                                    Icons.Default.Favorite,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        } else {
+                            {
+                                Icon(
+                                    Icons.Default.FavoriteBorder,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        },
+                )
+                Box {
+                    TextButton(onClick = { onSortMenuOpenChange(true) }) {
+                        Text(sortOrder.label)
+                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                    }
+                    DropdownMenu(
+                        expanded = sortMenuOpen,
+                        onDismissRequest = { onSortMenuOpenChange(false) },
+                    ) {
+                        LibrarySort.entries.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.label) },
+                                onClick = { onSortSelected(option) },
+                            )
+                        }
                     }
                 }
-            }
-            VerticalDivider(
-                modifier = Modifier.height(24.dp),
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
-            )
-            OutlinedButton(onClick = onImport, enabled = !importing) {
-                if (importing) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                if (onCreate != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = onImport,
+                            enabled = !importing,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(0.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        ) {
+                            if (importing) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("Import", maxLines = 1)
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = onPaste,
+                            enabled = !pasting,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(0.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        ) {
+                            if (pasting) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("Paste", maxLines = 1)
+                            }
+                        }
+                        Button(
+                            onClick = onCreate,
+                            colors =
+                                ButtonDefaults.buttonColors(
+                                    containerColor = Neo.Yellow,
+                                    contentColor = Neo.Ink,
+                                ),
+                            modifier = Modifier.weight(1.5f).border(3.dp, Neo.Ink),
+                            shape = RoundedCornerShape(0.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.widthIn(min = 4.dp))
+                            Text("New script", maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Black)
+                        }
+                    }
                 } else {
-                    Text("Import")
-                }
-            }
-            OutlinedButton(onClick = onPaste, enabled = !pasting) {
-                if (pasting) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                } else {
-                    Text("Paste")
+                    OutlinedButton(onClick = onImport, enabled = !importing) {
+                        if (importing) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Import")
+                        }
+                    }
+                    OutlinedButton(onClick = onPaste, enabled = !pasting) {
+                        if (pasting) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Paste")
+                        }
+                    }
                 }
             }
         }
@@ -468,14 +865,16 @@ private fun ScriptCard(
                 .replace(Regex("\\s+"), " ")
                 .trim()
         }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
-        onClick = onOpen,
+    NeoPanel(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpen),
+        color = Neo.White,
+        contentPadding = 18.dp,
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
@@ -507,9 +906,9 @@ private fun ScriptCard(
                         contentDescription = if (script.favorite) "Remove favorite" else "Add favorite",
                         tint =
                             if (script.favorite) {
-                                MaterialTheme.colorScheme.primary
+                                Neo.Magenta
                             } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
+                                Neo.Ink
                             },
                     )
                 }
@@ -594,35 +993,51 @@ private fun EmptyLibrary(
 ) {
     val searching = query.isNotBlank() || favoritesOnly
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+        NeoPanel(
+            modifier = Modifier.widthIn(max = 560.dp),
+            color = Neo.White,
+            contentPadding = 24.dp,
         ) {
-            Text(
-                text =
-                    when {
-                        searching && hasScripts -> "No matching scripts"
-                        favoritesOnly -> "No favorites yet"
-                        else -> "No scripts yet"
-                    },
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text =
-                    when {
-                        searching && hasScripts -> "Try a different search or clear the filters."
-                        favoritesOnly -> "Mark a script with the heart to keep it here."
-                        else -> "Create a script, import a file, or paste from the clipboard."
-                    },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (!searching) {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = onCreate) { Text("New script") }
-                    OutlinedButton(onClick = onImport) { Text("Import") }
-                    OutlinedButton(onClick = onPaste) { Text("Paste") }
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text =
+                        when {
+                            searching && hasScripts -> "No matching scripts"
+                            favoritesOnly -> "No favorites yet"
+                            else -> "No scripts yet"
+                        },
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Black,
+                )
+                Text(
+                    text =
+                        when {
+                            searching && hasScripts -> "Try a different search or clear the filters."
+                            favoritesOnly -> "Mark a script with the heart to keep it here."
+                            else -> "Create a script, import a file, or paste from the clipboard."
+                        },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!searching) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = onCreate,
+                            modifier = Modifier.border(3.dp, Neo.Ink),
+                            shape = RoundedCornerShape(0.dp),
+                            colors =
+                                ButtonDefaults.buttonColors(
+                                    containerColor = Neo.Yellow,
+                                    contentColor = Neo.Ink,
+                                ),
+                        ) { Text("New script") }
+                        OutlinedButton(onClick = onImport) { Text("Import") }
+                        OutlinedButton(onClick = onPaste) { Text("Paste") }
+                    }
                 }
             }
         }

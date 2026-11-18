@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.update
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -40,9 +41,23 @@ class ScriptRepository(
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
 
     init {
-        scriptsDir.mkdirs()
-        trashDir.mkdirs()
-        refresh()
+        scope.launch {
+            scriptsDir.mkdirs()
+            trashDir.mkdirs()
+            purgeTrash()
+            _scripts.value = listScripts()
+            _loading.value = false
+        }
+    }
+
+    /** Trash holds full scripts deleted by the user; purge files older than 30 days. */
+    private fun purgeTrash(maxAgeMs: Long = 30L * 24L * 60L * 60L * 1000L) {
+        val cutoff = System.currentTimeMillis() - maxAgeMs
+        trashDir.listFiles()?.forEach { file ->
+            if (file.isFile && file.lastModified() < cutoff) {
+                runCatching { file.delete() }
+            }
+        }
     }
 
     fun refresh() {
@@ -142,7 +157,7 @@ class ScriptRepository(
     ) {
         withContext(Dispatchers.IO) {
             val existing = getScriptOnIo(id) ?: return@withContext
-            val clamped = progress.coerceIn(0f, 1f)
+            val clamped = if (progress.isFinite()) progress.coerceIn(0f, 1f) else 0f
             val updated =
                 existing.copy(
                     lastPosition = clamped,
@@ -289,7 +304,9 @@ class ScriptRepository(
                         }.getOrNull()
                     if (script != null) {
                         val existingById = existing.firstOrNull { it.id == script.id }
-                        val exactCopy = existing.any { it.content == script.content }
+                        // Only skip entries identical to the one we already have on disk —
+                        // legitimately identical drafts from the backup keep distinct ids.
+                        val exactCopy = existingById != null && existingById.content == script.content
                         if (!exactCopy) {
                             val targetId = if (existingById != null) UUID.randomUUID().toString() else script.id
                             val targetTitle =
@@ -304,10 +321,12 @@ class ScriptRepository(
                                     title = targetTitle,
                                     updatedAt = System.currentTimeMillis(),
                                 )
-                            writeScript(restoredScript)
-                            existing += restoredScript
-                            usedTitles += restoredScript.title
-                            restored += 1
+                            val written = runCatching { writeScript(restoredScript); true }.getOrDefault(false)
+                            if (written) {
+                                existing += restoredScript
+                                usedTitles += restoredScript.title
+                                restored += 1
+                            }
                         }
                     }
                 }
@@ -321,7 +340,7 @@ class ScriptRepository(
     private fun writeScript(script: Script) {
         scriptsDir.mkdirs()
         val target = scriptFile(script.id)
-        val temp = File(scriptsDir, "${script.id}.tmp")
+        val temp = File(scriptsDir, "${script.id}.${UUID.randomUUID()}.tmp")
         FileOutputStream(temp).use { stream ->
             stream.write(scriptToJson(script).toByteArray(Charsets.UTF_8))
             stream.fd.sync()
@@ -340,7 +359,10 @@ class ScriptRepository(
                 StandardCopyOption.REPLACE_EXISTING,
             )
         }
-        _scripts.value = listScriptsOnIo()
+        _scripts.update { base ->
+            (base.filterNot { it.id == script.id } + script)
+                .sortedByDescending { it.updatedAt }
+        }
         _loading.value = false
     }
 
@@ -379,14 +401,20 @@ class ScriptRepository(
     private fun jsonToScript(json: JSONObject): Script {
         val content = json.optString("content")
         return Script(
-            id = json.getString("id"),
+            id =
+                json.getString("id").let { candidate ->
+                    if (ID_PATTERN.matches(candidate)) candidate else UUID.randomUUID().toString()
+                },
             title = json.optString("title").ifBlank { "Untitled script" },
             content = content,
             createdAt = json.optLong("createdAt"),
             updatedAt = json.optLong("updatedAt"),
             favorite = json.optBoolean("favorite"),
             stage = json.optJSONObject("stage")?.let(::jsonToStageSettings),
-            lastPosition = json.optDouble("lastPosition", 0.0).toFloat().coerceIn(0f, 1f),
+            lastPosition =
+                (json.optDouble("lastPosition", 0.0).takeIf { it.isFinite() } ?: 0.0)
+                    .toFloat()
+                    .coerceIn(0f, 1f),
             lastOpenedAt = json.optLong("lastOpenedAt"),
             words = json.optInt("words", wordCount(content)),
             characters = json.optInt("characters", content.length),
@@ -411,12 +439,18 @@ class ScriptRepository(
             .put("countdownSeconds", stage.countdownSeconds)
             .put("loop", stage.loop)
             .put("keepAwake", stage.keepAwake)
+            .put("panelTranslucent", stage.panelTranslucent)
+            .put("customTextArgb", stage.customTextArgb)
+            .put("customBackgroundArgb", stage.customBackgroundArgb)
+            .apply {
+                stage.customFontFile?.let { put("customFontFile", it) }
+            }
 
     private fun jsonToStageSettings(json: JSONObject): StageSettings =
         StageSettings(
             speedWpm = json.optDouble("speedWpm", 140.0).toFloat(),
             fontSizeSp = json.optDouble("fontSizeSp", 46.0).toFloat(),
-            focusFraction = json.optDouble("focusFraction", 0.5).toFloat(),
+            focusFraction = json.optDouble("focusFraction", 0.3).toFloat(),
             edgeAlpha = json.optDouble("edgeAlpha", 0.28).toFloat(),
             marginDp = json.optDouble("marginDp", 28.0).toFloat(),
             lineSpacing = json.optDouble("lineSpacing", 1.34).toFloat(),
@@ -430,6 +464,10 @@ class ScriptRepository(
             countdownSeconds = json.optInt("countdownSeconds", 3),
             loop = json.optBoolean("loop"),
             keepAwake = json.optBoolean("keepAwake", true),
+            panelTranslucent = json.optBoolean("panelTranslucent", false),
+            customTextArgb = json.optInt("customTextArgb", 0xFFF7F4EC.toInt()),
+            customBackgroundArgb = json.optInt("customBackgroundArgb", 0xFF000000.toInt()),
+            customFontFile = json.optString("customFontFile").takeIf { it.isNotBlank() },
         ).sanitized()
 
     private inline fun <reified T : Enum<T>> enumValue(
@@ -437,7 +475,17 @@ class ScriptRepository(
         fallback: T,
     ): T = enumValues<T>().firstOrNull { it.name == value } ?: fallback
 
-    private fun scriptFile(id: String): File = File(scriptsDir, "$id.$SCRIPT_EXTENSION")
+    private fun scriptFile(id: String): File {
+        // Never trust an id verbatim for a filesystem path (backup ids are attacker-controlled).
+        val safe = if (ID_PATTERN.matches(id)) id else sha256(id)
+        return File(scriptsDir, "$safe.$SCRIPT_EXTENSION")
+    }
+
+    private fun sha256(input: String): String =
+        java.security.MessageDigest
+            .getInstance("SHA-256")
+            .digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
 
     private fun cleanTitle(title: String): String = title.trim().take(MAX_TITLE_LENGTH).ifBlank { "Untitled script" }
 
@@ -489,5 +537,8 @@ class ScriptRepository(
         private const val MAX_SCRIPT_BYTES = 5 * 1024 * 1024
         private const val MAX_BACKUP_BYTES = 50L * 1024 * 1024
         private const val MAX_BACKUP_ENTRIES = 2_000
+
+        /** Safe script ids: uuid-like or simple dotted names; never path separators or "..". */
+        private val ID_PATTERN = Regex("^[A-Za-z0-9._-]{1,64}$")
     }
 }

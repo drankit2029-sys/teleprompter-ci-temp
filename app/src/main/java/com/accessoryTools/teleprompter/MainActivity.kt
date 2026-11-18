@@ -35,9 +35,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -62,6 +64,9 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.accessoryTools.teleprompter.ads.AdsInitialization
+import com.accessoryTools.teleprompter.ads.ConsentManager
+import com.accessoryTools.teleprompter.ads.InterstitialAds
 import com.accessoryTools.teleprompter.data.LibrarySort
 import com.accessoryTools.teleprompter.data.Script
 import com.accessoryTools.teleprompter.data.ScriptImportException
@@ -75,6 +80,7 @@ import com.accessoryTools.teleprompter.ui.TeleprompterTheme
 import com.accessoryTools.teleprompter.ui.editor.EditorScreen
 import com.accessoryTools.teleprompter.ui.library.LibraryScreen
 import com.accessoryTools.teleprompter.ui.settings.SettingsScreen
+import com.google.android.gms.ads.MobileAds
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -119,6 +125,21 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        // UMP consent must resolve before any ad request. MobileAds.initialize
+        // is intentionally delayed until then.
+        ConsentManager.gather(this) {
+            if (!BuildConfig.AD_FREE) {
+                runCatching {
+                    MobileAds.initialize(this) {
+                        AdsInitialization.markReady()
+                        InterstitialAds.preload(this)
+                    }
+                }.onFailure { error ->
+                    Log.w(TAG, "MobileAds.initialize failed", error)
+                    AdsInitialization.markFailed()
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -155,14 +176,16 @@ class MainActivity : ComponentActivity() {
 
     private fun applyNextPipSize() {
         if (!isInPictureInPictureMode) {
-            Log.d(TAG, "Ignoring PiP resize outside PiP")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Ignoring PiP resize outside PiP")
             return
         }
         pipAspectIndex = (pipAspectIndex + 1) % PIP_ASPECTS.size
         val aspect = PIP_ASPECTS[pipAspectIndex]
-        Log.d(TAG, "Applying PiP aspect $aspect (index $pipAspectIndex)")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Applying PiP aspect $aspect (index $pipAspectIndex)")
         runCatching { setPictureInPictureParams(buildPipParams()) }
-            .onFailure { error -> Log.w(TAG, "Could not resize PiP window", error) }
+            .onFailure { error ->
+                if (BuildConfig.DEBUG) Log.w(TAG, "Could not resize PiP window", error)
+            }
     }
 
     private fun buildPipParams(): PictureInPictureParams {
@@ -249,10 +272,15 @@ class MainActivity : ComponentActivity() {
         val scripts by app.scripts.scripts.collectAsState()
         val loading by app.scripts.loading.collectAsState()
         val storedSettings by app.settings.settings.collectAsState(initial = null)
+        val sortState = androidx.compose.runtime.rememberUpdatedState(storedSettings?.sortOrder)
+        val favState = androidx.compose.runtime.rememberUpdatedState(storedSettings?.favoritesOnly)
 
         var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
         var startOverlayRequested by remember { mutableStateOf(false) }
         var awaitingNotificationPermission by remember { mutableStateOf(false) }
+        var exitingStage by remember { mutableStateOf(false) }
+        var showProjectionDisclosure by remember { mutableStateOf(false) }
+        var showOverlayDisclosure by remember { mutableStateOf(false) }
 
         val overlayPermissionLauncher =
             rememberLauncherForActivityResult(
@@ -266,6 +294,21 @@ class MainActivity : ComponentActivity() {
             ) {
                 awaitingNotificationPermission = false
             }
+        // After the overlay starts, send the app to the background (like entering PiP)
+        // so the camera app underneath becomes visible. Only exits once the overlay is actually running.
+        val exitAppWhenOverlayReady: () -> Unit = {
+            scope.launch {
+                val started =
+                    (1..20).any {
+                        delay(100)
+                        PrompterSession.overlayRunning
+                    }
+                if (started && !activity.isInPictureInPictureMode) {
+                    activity.moveTaskToBack(true)
+                }
+            }
+        }
+
         val projectionLauncher =
             rememberLauncherForActivityResult(
                 ActivityResultContracts.StartActivityForResult(),
@@ -279,6 +322,7 @@ class MainActivity : ComponentActivity() {
                         resultData = result.data,
                         displayId = displayId,
                     )
+                    exitAppWhenOverlayReady()
                 } else {
                     Toast
                         .makeText(
@@ -291,6 +335,7 @@ class MainActivity : ComponentActivity() {
                         adaptiveContrast = false,
                         displayId = displayId,
                     )
+                    exitAppWhenOverlayReady()
                 }
             }
 
@@ -318,8 +363,9 @@ class MainActivity : ComponentActivity() {
                     PrompterSession.adaptiveContrastEnabled &&
                     displayId == Display.DEFAULT_DISPLAY
                 ) {
-                    val manager = context.getSystemService(MediaProjectionManager::class.java)
-                    projectionLauncher.launch(manager.createScreenCaptureIntent())
+                    // Prominent disclosure before the system screen-capture
+                    // consent (Play MediaProjection policy).
+                    showProjectionDisclosure = true
                 } else {
                     if (PrompterSession.adaptiveContrastEnabled) {
                         Toast
@@ -334,6 +380,7 @@ class MainActivity : ComponentActivity() {
                         adaptiveContrast = false,
                         displayId = displayId,
                     )
+                    exitAppWhenOverlayReady()
                 }
             }
         }
@@ -348,6 +395,78 @@ class MainActivity : ComponentActivity() {
             if (initialStage) {
                 navController.navigate(Routes.STAGE)
             }
+        }
+
+        if (showOverlayDisclosure) {
+            AlertDialog(
+                onDismissRequest = {
+                    showOverlayDisclosure = false
+                    startOverlayRequested = false
+                },
+                title = { Text("Draw over other apps") },
+                text = {
+                    Text(
+                        "Teleprompter needs the \"display over other apps\" permission so your " +
+                            "script can float above the camera or any other app while you record. " +
+                            "The overlay only draws text; it does not read or interact with other " +
+                            "apps' content. You can stop it at any time from its notification.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showOverlayDisclosure = false
+                            activity.openOverlayPermissionSettings()
+                        },
+                    ) { Text("Continue") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showOverlayDisclosure = false
+                            startOverlayRequested = false
+                        },
+                    ) { Text("Not now") }
+                },
+            )
+        }
+
+        if (showProjectionDisclosure) {
+            AlertDialog(
+                onDismissRequest = { showProjectionDisclosure = false },
+                title = { Text("Screen capture for adaptive contrast") },
+                text = {
+                    Text(
+                        "Adaptive contrast reads your screen about once per second to measure " +
+                            "brightness and choose a readable text color. Frames are analyzed in " +
+                            "memory on this device only — never saved, never uploaded. Capture " +
+                            "stops when you stop the overlay. You can also continue with manual " +
+                            "colors instead.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showProjectionDisclosure = false
+                            val manager = context.getSystemService(MediaProjectionManager::class.java)
+                            projectionLauncher.launch(manager.createScreenCaptureIntent())
+                        },
+                    ) { Text("Continue") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showProjectionDisclosure = false
+                            PrompterOverlayService.start(
+                                context = context,
+                                adaptiveContrast = false,
+                                displayId = activity.currentDisplayId(),
+                            )
+                            exitAppWhenOverlayReady()
+                        },
+                    ) { Text("Use manual colors") }
+                },
+            )
         }
 
         DisposableEffect(
@@ -401,6 +520,8 @@ class MainActivity : ComponentActivity() {
             val observer =
                 LifecycleEventObserver { _, event ->
                     if (event == Lifecycle.Event.ON_PAUSE) {
+                        // Last chance to persist pending prompter settings before death.
+                        app.settings.flushPrompterSettings()
                         val id = PrompterSession.scriptId ?: return@LifecycleEventObserver
                         val progress = PrompterSession.progress
                         val stage = PrompterSession.currentStageSettings()
@@ -445,20 +566,48 @@ class MainActivity : ComponentActivity() {
         }
 
         val exitStage: () -> Unit = {
-            scope.launch {
-                PrompterSession.setControlLocked(false)
-                if (!PrompterSession.overlayRunning) {
-                    PrompterSession.setPlayback(false)
+            if (!exitingStage) {
+                exitingStage = true
+                scope.launch {
+                    PrompterSession.setControlLocked(false)
+                    if (!PrompterSession.overlayRunning) {
+                        PrompterSession.setPlayback(false)
+                    }
+                    saveStageProgress()
+                    // Show the interstitial before the library (the break page)
+                    // rather than after it. onFinished always runs so navigation
+                    // is never blocked by an unavailable ad.
+                    InterstitialAds.maybeShow(activity) {
+                        if (!activity.isFinishing && !activity.isDestroyed) {
+                            navController.popBackStack()
+                        }
+                        exitingStage = false
+                    }
                 }
-                saveStageProgress()
-                navController.popBackStack()
+            }
+        }
+
+        val exitStageWithoutAd: () -> Unit = {
+            if (!exitingStage) {
+                exitingStage = true
+                scope.launch {
+                    PrompterSession.setControlLocked(false)
+                    if (!PrompterSession.overlayRunning) {
+                        PrompterSession.setPlayback(false)
+                    }
+                    saveStageProgress()
+                    if (!activity.isFinishing && !activity.isDestroyed) {
+                        navController.popBackStack()
+                    }
+                    exitingStage = false
+                }
             }
         }
 
         val requestOverlayStart: () -> Unit = {
             if (!Settings.canDrawOverlays(context)) {
                 startOverlayRequested = true
-                activity.openOverlayPermissionSettings()
+                showOverlayDisclosure = true
             } else if (
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 ContextCompat.checkSelfPermission(
@@ -474,27 +623,22 @@ class MainActivity : ComponentActivity() {
             }
         }
         val requestOverlayPermission: () -> Unit = {
-            activity.openOverlayPermissionSettings()
+            showOverlayDisclosure = true
         }
 
-        val importUris: suspend (List<Uri>) -> Int = { uris ->
+        val importUris: suspend (List<Uri>) -> Pair<Int, List<String>> = { uris ->
             var imported = 0
-            var firstError: Throwable? = null
+            val failed = mutableListOf<String>()
             uris.forEach { uri ->
                 try {
                     val document = ScriptImporter.import(context, uri)
                     app.scripts.createScript(document.title, document.content)
                     imported += 1
-                } catch (error: Throwable) {
-                    if (firstError == null) {
-                        firstError = error
-                    }
+                } catch (_: Throwable) {
+                    failed += uri.lastPathSegment?.substringAfterLast('/') ?: uri.toString()
                 }
             }
-            if (imported == 0) {
-                throw firstError ?: ScriptImportException("No scripts were imported.")
-            }
-            imported
+            imported to failed
         }
 
         val importClipboard: suspend () -> Boolean = {
@@ -573,11 +717,11 @@ class MainActivity : ComponentActivity() {
                     initialSort = storedSettings?.sortOrder ?: LibrarySort.UPDATED,
                     initialFavoritesOnly = storedSettings?.favoritesOnly ?: false,
                     onSortChanged = { sort ->
-                        app.settings.saveLibraryPreferences(sort, storedSettings?.favoritesOnly ?: false)
+                        app.settings.saveLibraryPreferences(sort, favState.value ?: false)
                     },
                     onFavoritesChanged = { favoritesOnly ->
                         app.settings.saveLibraryPreferences(
-                            storedSettings?.sortOrder ?: LibrarySort.UPDATED,
+                            sortState.value ?: LibrarySort.UPDATED,
                             favoritesOnly,
                         )
                     },
@@ -609,7 +753,9 @@ class MainActivity : ComponentActivity() {
                     onDuplicate = { script ->
                         scope.launch { app.scripts.duplicateScript(script.id) }
                     },
-                    onShare = { script -> ScriptSharing.shareText(context, script) },
+                    onShare = { script ->
+                        scope.launch { ScriptSharing.shareText(context, script) }
+                    },
                     onDelete = { script ->
                         scope.launch { app.scripts.deleteScript(script.id) }
                     },
@@ -659,10 +805,12 @@ class MainActivity : ComponentActivity() {
                                 navController.navigate(Routes.STAGE)
                             },
                             onShare = { title, content ->
-                                ScriptSharing.shareText(
-                                    context,
-                                    script.copy(title = title, content = content),
-                                )
+                                scope.launch {
+                                    ScriptSharing.shareText(
+                                        context,
+                                        script.copy(title = title, content = content),
+                                    )
+                                }
                             },
                             onExport = { title, content, markdown, uri ->
                                 ScriptSharing.export(
@@ -708,11 +856,35 @@ class MainActivity : ComponentActivity() {
                         app.scripts.refresh()
                         restored
                     },
+                    onOpenPrivacyPolicy = {
+                        runCatching {
+                            startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(AppInfo.PRIVACY_POLICY_URL)),
+                            )
+                        }.onFailure {
+                            Toast
+                                .makeText(
+                                    context,
+                                    "Could not open the privacy policy",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                        }
+                    },
+                    onShowPrivacyOptions = { ConsentManager.showPrivacyOptions(activity) },
                 )
             }
 
             composable(Routes.STAGE) {
-                BackHandler(onBack = exitStage)
+                // If the process was killed, PrompterSession resets to a demo-less
+                // state; pop to the library instead of silently showing the demo text.
+                LaunchedEffect(Unit) {
+                    if (PrompterSession.scriptId == null) {
+                        navController.navigate(Routes.LIBRARY) {
+                            popUpTo(Routes.LIBRARY) { inclusive = true }
+                        }
+                    }
+                }
+                BackHandler(onBack = exitStageWithoutAd)
                 StageScreen(
                     isInPip = isInPip,
                     pipSupported = pipSupported,
@@ -930,7 +1102,12 @@ class MainActivity : ComponentActivity() {
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName"),
             )
-        startActivity(intent)
+        runCatching { startActivity(intent) }
+            .onFailure {
+                Toast
+                    .makeText(this, "Could not open the overlay permission settings", Toast.LENGTH_LONG)
+                    .show()
+            }
     }
 
     private object Routes {

@@ -131,9 +131,9 @@ for f in "$SRC/app/build.gradle" "$SRC/app/build.gradle.kts"; do
 done
 [ -n "$GRADLE_APP" ] || die "app/build.gradle not found in $SRC"
 
-APP_ID="$(grep -m1 -E '^[[:space:]]*applicationId' "$GRADLE_APP" | sed -nE 's/.*"([^"]+)".*/\1/p' || true)"
+APP_ID="$(grep -m1 -E '^[[:space:]]*applicationId[[:space:]]*=' "$GRADLE_APP" | sed -nE 's/.*"([^"]+)".*/\1/p' || true)"
 if [ -z "$APP_ID" ]; then
-    APP_ID="$(grep -m1 -E '^[[:space:]]*applicationId' "$GRADLE_APP" | sed -nE "s/.*'([^']+)'.*/\1/p" || true)"
+    APP_ID="$(grep -m1 -E '^[[:space:]]*applicationId[[:space:]]*=' "$GRADLE_APP" | sed -nE "s/.*'([^']+)'.*/\1/p" || true)"
 fi
 if [ -z "$APP_ID" ]; then
     APP_ID="$(grep -m1 -E '^[[:space:]]*namespace' "$GRADLE_APP" | sed -nE 's/.*"([^"]+)".*/\1/p' || true)"
@@ -324,7 +324,7 @@ else
     KTLINT_PID=
 fi
 set +e
-bash ./gradlew :app:lintDebug --configuration-cache --console=plain $LINT_FULL_ARG
+bash ./gradlew :app:lintBaseDebug --configuration-cache --console=plain $LINT_FULL_ARG
 LINT_STATUS=\$?
 KTLINT_STATUS=0
 if [ -n \"\$KTLINT_PID\" ]; then
@@ -344,7 +344,7 @@ fi"
 fi
 
 echo "[3/5] Building on phone (incremental)..."
-"${SSH[@]}" "cd \$HOME && tar -xzf '$STAGE/$PROJECT-sync.tar.gz' && cd '$PROJECT_DIR_NAME' && chmod +x ./gradlew && [ -f local.properties ] || echo sdk.dir=\$HOME/android-sdk > local.properties && bash ./gradlew assembleDebug --configuration-cache --console=plain"
+"${SSH[@]}" "cd \$HOME && tar -xzf '$STAGE/$PROJECT-sync.tar.gz' && cd '$PROJECT_DIR_NAME' && chmod +x ./gradlew && [ -f local.properties ] || echo sdk.dir=\$HOME/android-sdk > local.properties && bash ./gradlew assembleBaseDebug --configuration-cache --console=plain"
 
 wait_for_target
 echo "[4/5] Installing on $TARGET..."

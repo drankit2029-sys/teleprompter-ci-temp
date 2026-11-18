@@ -1,5 +1,9 @@
 package com.accessoryTools.teleprompter.overlay
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
+import android.app.ActivityOptions
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -41,8 +45,20 @@ class PrompterOverlayService : Service() {
     private lateinit var mainHandler: Handler
     private var targetDisplayId = Display.DEFAULT_DISPLAY
     private var scriptView: PrompterOverlayView? = null
+    private var scriptParams: WindowManager.LayoutParams? = null
     private var controlBar: OverlayControlBar? = null
+    private var controlHost: android.widget.FrameLayout? = null
+    private var barX = 0f
+    private var barY = 0f
     private var controlParams: WindowManager.LayoutParams? = null
+    private var areaAdjusting = false
+    private var wasPlayingBeforeAdjust = false
+    private var controlsCollapsed = false
+    private var preCollapseX = 0f
+    private var collapseEdgeRight = true
+    private var collapseAnimator: ValueAnimator? = null
+    private var snapAnimator: ValueAnimator? = null
+    private var lastControlInteractionAt = 0L
 
     private var mediaProjection: MediaProjection? = null
     private var imageReader: ImageReader? = null
@@ -67,7 +83,23 @@ class PrompterOverlayService : Service() {
     private val refreshRunnable =
         object : Runnable {
             override fun run() {
+                val now = SystemClock.elapsedRealtime()
+                if (!controlsCollapsed && !areaAdjusting &&
+                    now - lastControlInteractionAt >= CONTROL_COLLAPSE_DELAY_MS
+                ) {
+                    collapseControls()
+                }
+                if (targetDisplayId != Display.DEFAULT_DISPLAY &&
+                    getSystemService(DisplayManager::class.java).getDisplay(targetDisplayId) == null
+                ) {
+                    // The display this overlay was attached to went away (e.g. scrcpy
+                    // virtual display closed); shut down instead of idling forever.
+                    stopSelf()
+                    return
+                }
+                clampControlBarToScreen()
                 controlBar?.refresh()
+                scriptView?.invalidate()
                 mainHandler.postDelayed(this, CONTROL_REFRESH_MS)
             }
         }
@@ -92,6 +124,14 @@ class PrompterOverlayService : Service() {
                 return START_NOT_STICKY
             }
 
+            ACTION_STOP_CAPTURE -> {
+                releaseProjection()
+                demoteForegroundWithoutProjection()
+                scriptView?.invalidate()
+                controlBar?.refresh()
+                return START_NOT_STICKY
+            }
+
             ACTION_TOGGLE_PLAY -> {
                 PrompterSession.togglePlay()
                 scriptView?.kick()
@@ -106,6 +146,33 @@ class PrompterOverlayService : Service() {
         return START_NOT_STICKY
     }
 
+    /** True when an overlay window pair (script + control bar) exists. */
+    private fun hasOverlayViews(): Boolean = scriptView != null || controlHost != null
+
+    /** Removes the overlay windows and resets in-memory view state (used when rebuilding on another display). */
+    private fun teardownOverlayViews() {
+        mainHandler.removeCallbacks(refreshRunnable)
+        mainHandler.removeCallbacks(squareSnapRunnable)
+        collapseAnimator?.cancel()
+        snapAnimator?.cancel()
+        collapseAnimator = null
+        snapAnimator = null
+        controlsCollapsed = false
+        if (areaAdjusting) {
+            PrompterSession.persistOverlayArea()
+            PrompterSession.updateOverlayAreaAdjusting(false)
+            areaAdjusting = false
+        }
+        wasPlayingBeforeAdjust = false
+        controlHost?.let { runCatching { windowManager.removeView(it) } }
+        scriptView?.let { runCatching { windowManager.removeView(it) } }
+        controlBar = null
+        controlHost = null
+        scriptView = null
+        controlParams = null
+        PrompterSession.onOverlayAreaPreviewChanged = null
+    }
+
     private fun startOverlay(intent: Intent?) {
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Overlay permission is required", Toast.LENGTH_SHORT).show()
@@ -117,6 +184,8 @@ class PrompterOverlayService : Service() {
         val requestedDisplayId =
             intent?.getIntExtra(EXTRA_DISPLAY_ID, Display.DEFAULT_DISPLAY)
                 ?: Display.DEFAULT_DISPLAY
+        val previousDisplayId = targetDisplayId
+        val viewsExist = hasOverlayViews()
         val display = getSystemService(DisplayManager::class.java).getDisplay(requestedDisplayId)
         val displayContext =
             if (display != null && requestedDisplayId != Display.DEFAULT_DISPLAY) {
@@ -124,10 +193,25 @@ class PrompterOverlayService : Service() {
             } else {
                 null
             }
+        if (requestedDisplayId != Display.DEFAULT_DISPLAY && displayContext == null) {
+            // Asked for an overlay on a specific display that's gone/unusable — fail loud.
+            Toast
+                .makeText(
+                    this,
+                    "The requested display is unavailable",
+                    Toast.LENGTH_LONG,
+                ).show()
+            stopSelf()
+            return
+        }
         overlayContext = displayContext ?: this
         targetDisplayId =
             if (displayContext != null) requestedDisplayId else Display.DEFAULT_DISPLAY
         windowManager = overlayContext.getSystemService(WindowManager::class.java)
+        if (viewsExist && previousDisplayId != targetDisplayId) {
+            // Rebuild the windows on the requested display instead of leaking the old ones.
+            teardownOverlayViews()
+        }
         val projectionAvailable =
             resultData != null && targetDisplayId == Display.DEFAULT_DISPLAY
         if (adaptive && !projectionAvailable) {
@@ -139,54 +223,74 @@ class PrompterOverlayService : Service() {
                 ).show()
         }
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
-        startAsForeground(hasProjection = projectionAvailable)
-        showOverlay()
+        if (!startAsForeground(hasProjection = projectionAvailable)) {
+            return
+        }
+        if (!showOverlay()) {
+            return
+        }
         if (adaptive && resultData != null && targetDisplayId == Display.DEFAULT_DISPLAY) {
             startProjection(resultCode, resultData)
         } else {
+            // A manual or other-display start must not leave a stale projection sampling.
+            releaseProjection()
             PrompterSession.updateProjectionActive(false)
         }
         mainHandler.removeCallbacks(refreshRunnable)
         mainHandler.post(refreshRunnable)
     }
 
-    private fun startAsForeground(hasProjection: Boolean) {
-        ensureNotificationChannel()
-        val type =
-            when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && hasProjection -> {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+    private fun startAsForeground(hasProjection: Boolean): Boolean {
+        return runCatching {
+            ensureNotificationChannel()
+            val type =
+                when {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && hasProjection -> {
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    }
+
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    }
+
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && hasProjection -> {
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                }
+                    }
 
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    else -> {
+                        0
+                    }
                 }
-
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && hasProjection -> {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                }
-
-                else -> {
-                    0
-                }
-            }
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(),
-            type,
-        )
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(),
+                type,
+            )
+            true
+        }.getOrElse {
+            Toast.makeText(this, "Could not start the overlay", Toast.LENGTH_LONG).show()
+            stopSelf()
+            false
+        }
     }
 
-    private fun showOverlay() {
-        PrompterSession.updateOverlayRunning(true)
-        if (scriptView == null) {
-            val view = PrompterOverlayView(overlayContext)
-            windowManager.addView(view, scriptLayoutParams())
-            scriptView = view
+    private fun showOverlay(): Boolean {
+        PrompterSession.onOverlayAreaPreviewChanged = { area ->
+            if (area == PrompterSession.overlayArea) {
+                mainHandler.post { scriptView?.refreshOverlayArea() }
+            }
         }
-        if (controlBar == null) {
+        try {
+            if (scriptView == null) {
+                val view = PrompterOverlayView(overlayContext)
+                val params = scriptLayoutParams()
+                scriptParams = params
+                windowManager.addView(view, params)
+                scriptView = view
+            }
+            if (controlBar == null) {
             val bar =
                 OverlayControlBar(
                     context = overlayContext,
@@ -198,17 +302,390 @@ class PrompterOverlayService : Service() {
                         PrompterSession.restart()
                         scriptView?.kick()
                     },
-                    onSlower = { PrompterSession.nudgeSpeed(-SPEED_STEP) },
-                    onFaster = { PrompterSession.nudgeSpeed(SPEED_STEP) },
+                    onSlower = { changeOverlaySpeed(-SPEED_STEP) },
+                    onFaster = { changeOverlaySpeed(SPEED_STEP) },
+                    onToggleArea = ::toggleAreaAdjusting,
+                    onOpenStudio = ::openTeleprompterFromOverlay,
                     onStop = { stopSelf() },
                     onDrag = ::dragControls,
-                )
-            val params = controlLayoutParams()
+                ).apply {
+                    onInteraction = { noteControlInteraction() }
+                    onExpandRequested = { expandControlsIfCollapsed() }
+                    onSquareDrag = { dx, dy -> dragCollapsedSquare(dx, dy) }
+                    onSquareTouchEnd = { wasDrag -> onSquareTouchEnd(wasDrag) }
+                }
+            // The control window wraps ONLY the bar itself. A full-screen canvas
+            // window is supposed to pass unconsumed touches through, but on some
+            // devices/ROMs (seen on Samsung One UI) it swallows every tap below it.
+            // Sizing the window to the bar makes pass-through structural.
+            val host =
+                android.widget.FrameLayout(overlayContext).apply {
+                    clipChildren = false
+                }
+            host.addView(
+                bar,
+                android.widget.FrameLayout.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.TOP or android.view.Gravity.START,
+                ),
+            )
+            barX = 0f
+            barY = -dp(80).toFloat()
+            val params = controlWindowParams(0, -dp(80))
+            lastControlInteractionAt = SystemClock.elapsedRealtime()
+            controlsCollapsed = false
+            preCollapseX = 0f
+            controlHost = host
             controlParams = params
-            windowManager.addView(bar, params)
+            windowManager.addView(host, params)
             controlBar = bar
+            bar.post {
+                val bounds = currentScreenBounds()
+                barX = ((bounds.first - bar.width) / 2).coerceAtLeast(0).toFloat()
+                barY = (bounds.second - bar.height - dp(64) - navigationBarHeightPx()).coerceAtLeast(0).toFloat()
+                applyBarTranslation()
+            }
+            }
+        } catch (error: RuntimeException) {
+            // Roll back whatever this start added so the process doesn't die or
+            // leave invisible overlay windows attached.
+            teardownOverlayViews()
+            PrompterSession.updateOverlayRunning(false)
+            Toast.makeText(overlayContext, "Could not start the overlay", Toast.LENGTH_LONG).show()
+            stopSelf()
+            return false
         }
+        PrompterSession.updateOverlayRunning(true)
         controlBar?.refresh()
+        return true
+    }
+
+    private fun noteControlInteraction() {
+        lastControlInteractionAt = SystemClock.elapsedRealtime()
+    }
+
+    private fun applyBarTranslation() {
+        val host = controlHost ?: return
+        val params = controlParams ?: return
+        val nextX = barX.toInt()
+        val nextY = barY.toInt()
+        if (params.x == nextX && params.y == nextY) {
+            return
+        }
+        params.x = nextX
+        params.y = nextY
+        runCatching { windowManager.updateViewLayout(host, params) }
+    }
+
+    /** Brings the Teleprompter activity back to the front, on the overlay's own display. */
+    private fun openTeleprompterFromOverlay() {
+        val intent =
+            Intent(this, MainActivity::class.java).addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT,
+            )
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && targetDisplayId != Display.DEFAULT_DISPLAY) {
+                val options =
+                    ActivityOptions.makeBasic().setLaunchDisplayId(targetDisplayId).toBundle()
+                startActivity(intent, options)
+            } else {
+                startActivity(intent)
+            }
+        }.getOrElse {
+            // The requested display may have gone away; open on the primary display instead.
+            runCatching { startActivity(intent) }
+        }
+    }
+
+    /** Height of the system navigation bar, so the bar never rests beneath it. */
+    private fun navigationBarHeightPx(): Int =
+        try {
+            val res = overlayContext.resources
+            val id = res.getIdentifier("navigation_bar_height", "dimen", "android")
+            if (id != 0) res.getDimensionPixelSize(id) else 0
+        } catch (_: Exception) {
+            0
+        }
+
+    fun clampControlBarToScreen() {
+        val bar = controlBar ?: return
+        if (bar.width <= 0 || bar.height <= 0) {
+            return
+        }
+        val bounds = currentScreenBounds()
+        val newX = barX.coerceIn(0f, (bounds.first - bar.width).coerceAtLeast(0).toFloat())
+        val newY = barY.coerceIn(0f, (bounds.second - bar.height - navigationBarHeightPx()).coerceAtLeast(0).toFloat())
+        if (newX != barX || newY != barY) {
+            barX = newX
+            barY = newY
+            applyBarTranslation()
+        }
+    }
+
+    private fun collapseControls() {
+        val bar = controlBar ?: return
+        val bounds = currentScreenBounds()
+        if (controlsCollapsed) {
+            return
+        }
+        if (bar.width <= 0 || bar.height <= 0) {
+            bar.post { collapseControls() }
+            return
+        }
+        val startW = bar.width
+        val startX = barX
+        val startY = barY
+        val square = dp(60)
+        collapseEdgeRight = startX + startW / 2 >= bounds.first / 2
+        val targetX =
+            if (collapseEdgeRight) {
+                (bounds.first - square - dp(8)).coerceAtLeast(0).toFloat()
+            } else {
+                dp(8).toFloat()
+            }
+        preCollapseX = startX
+        controlsCollapsed = true
+        collapseAnimator?.cancel()
+        bar.prepareCollapseVisuals()
+        val animator = ValueAnimator.ofFloat(0f, 1f)
+        collapseAnimator = animator
+        animator.duration = 220L
+        animator.interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+        bar.setAnimating(true)
+        animator.addUpdateListener { frame ->
+            val progress = frame.animatedFraction
+            barX = lerpF(startX, targetX, progress)
+            barY = startY.coerceIn(0f, (bounds.second - square - navigationBarHeightPx()).coerceAtLeast(0).toFloat())
+            applyBarTranslation()
+            bar.setCollapseProgress(progress)
+        }
+        animator.addListener(
+            object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    collapseAnimator = null
+                    bar.setAnimating(false)
+                    bar.setCollapsed(true)
+                    barX = targetX
+                    barY = startY.coerceIn(0f, (bounds.second - square - navigationBarHeightPx()).coerceAtLeast(0).toFloat())
+                    applyBarTranslation()
+                    // Width shrank to the square — give the window the new size.
+                    relayoutControlWindow()
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    collapseAnimator = null
+                    bar.setAnimating(false)
+                    bar.setCollapsed(true)
+                    barX = targetX
+                    applyBarTranslation()
+                    relayoutControlWindow()
+                }
+            },
+        )
+        animator.start()
+    }
+
+    private fun expandControlsIfCollapsed() {
+        val bar = controlBar ?: return
+        val bounds = currentScreenBounds()
+        if (!controlsCollapsed) {
+            return
+        }
+        if (bar.width <= 0 || bar.height <= 0) {
+            bar.post { expandControlsIfCollapsed() }
+            return
+        }
+        val square = dp(60)
+        val startX = barX
+        val startY = barY
+        controlsCollapsed = false
+        collapseAnimator?.cancel()
+        mainHandler.removeCallbacks(squareSnapRunnable)
+        snapAnimator?.cancel()
+        bar.prepareExpandVisuals()
+        // Re-measure now (row visible again) so the window grows with the bar.
+        relayoutControlWindow()
+        // Measure the full row so the x target stays on-screen; the bar keeps
+        // its own natural size — the window no longer resizes per frame.
+        val naturalWidth =
+            run {
+                val widthSpec = android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+                val heightSpec = android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+                bar.measure(widthSpec, heightSpec)
+                bar.measuredWidth.coerceAtLeast(square)
+            }
+        val targetX = preCollapseX.coerceIn(0f, (bounds.first - naturalWidth).coerceAtLeast(0).toFloat())
+        val animator = ValueAnimator.ofFloat(0f, 1f)
+        collapseAnimator = animator
+        animator.duration = 220L
+        animator.interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+        bar.setAnimating(true)
+        animator.addUpdateListener { frame ->
+            val progress = frame.animatedFraction
+            barX = lerpF(startX, targetX, progress)
+            applyBarTranslation()
+            bar.setCollapseProgress(1f - progress)
+        }
+        animator.addListener(
+            object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    collapseAnimator = null
+                    bar.setAnimating(false)
+                    bar.setCollapsed(false)
+                    barX = targetX
+                    barY = startY.coerceIn(0f, (bounds.second - dp(64) - navigationBarHeightPx()).coerceAtLeast(0).toFloat())
+                    applyBarTranslation()
+                    relayoutControlWindow()
+                    controlBar?.refresh()
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    collapseAnimator = null
+                    bar.setAnimating(false)
+                    bar.setCollapsed(false)
+                    barX = preCollapseX.coerceIn(0f, (bounds.first - naturalWidth).coerceAtLeast(0).toFloat())
+                    barY = startY.coerceIn(0f, (bounds.second - dp(64) - navigationBarHeightPx()).coerceAtLeast(0).toFloat())
+                    applyBarTranslation()
+                    relayoutControlWindow()
+                    controlBar?.refresh()
+                }
+            },
+        )
+        animator.start()
+        lastControlInteractionAt = SystemClock.elapsedRealtime()
+    }
+
+    private fun lerpF(
+        from: Float,
+        to: Float,
+        fraction: Float,
+    ): Float = from + (to - from) * fraction
+
+    private fun dragCollapsedSquare(
+        dx: Float,
+        dy: Float,
+    ) {
+        val bar = controlBar ?: return
+        val bounds = currentScreenBounds()
+        val square = bar.width.coerceAtLeast(dp(60))
+        mainHandler.removeCallbacks(squareSnapRunnable)
+        snapAnimator?.cancel()
+        barX = (barX + dx).coerceIn(0f, (bounds.first - square).coerceAtLeast(0).toFloat())
+        barY = (barY + dy).coerceIn(0f, (bounds.second - square - navigationBarHeightPx()).coerceAtLeast(0).toFloat())
+        collapseEdgeRight = barX + square / 2 >= bounds.first / 2
+        noteControlInteraction()
+        applyBarTranslation()
+    }
+
+    /** Called when a touch gesture on the collapsed square ends. */
+    private fun onSquareTouchEnd(wasDrag: Boolean) {
+        mainHandler.removeCallbacks(squareSnapRunnable)
+        if (!controlsCollapsed) {
+            return
+        }
+        if (wasDrag) {
+            mainHandler.postDelayed(squareSnapRunnable, SQUARE_SNAP_DELAY_MS)
+        }
+    }
+
+    private val squareSnapRunnable =
+        Runnable { snapSquareToEdge() }
+
+    /** Snaps the collapsed square to the nearest vertical edge with a gentle animation. */
+    private fun snapSquareToEdge() {
+        val bar = controlBar ?: return
+        val bounds = currentScreenBounds()
+        val square = bar.width.coerceAtLeast(dp(60))
+        if (!controlsCollapsed) {
+            return
+        }
+        val targetX =
+            if (barX + square / 2 >= bounds.first / 2) {
+                (bounds.first - square - dp(8)).coerceAtLeast(0).toFloat()
+            } else {
+                dp(8).toFloat()
+            }
+        val startX = barX
+        collapseEdgeRight = targetX + square / 2 >= bounds.first / 2
+        snapAnimator?.cancel()
+        if (startX == targetX) {
+            return
+        }
+        val animator = ValueAnimator.ofFloat(0f, 1f)
+        snapAnimator = animator
+        animator.duration = 180L
+        animator.interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+        animator.addUpdateListener { frame ->
+            barX = lerpF(startX, targetX, frame.animatedFraction)
+            applyBarTranslation()
+        }
+        animator.addListener(
+            object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    barX = targetX
+                    snapAnimator = null
+                    applyBarTranslation()
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    snapAnimator = null
+                }
+            },
+        )
+        animator.start()
+    }
+
+    private fun toggleAreaAdjusting() {
+        if (scriptView == null || scriptParams == null) {
+            return
+        }
+        areaAdjusting = !areaAdjusting
+        PrompterSession.updateOverlayAreaAdjusting(areaAdjusting)
+        if (areaAdjusting) {
+            wasPlayingBeforeAdjust = PrompterSession.isPlaying
+            if (wasPlayingBeforeAdjust) {
+                PrompterSession.setPlayback(false)
+            }
+        } else {
+            PrompterSession.persistOverlayArea()
+            if (wasPlayingBeforeAdjust) {
+                PrompterSession.setPlayback(true)
+                scriptView?.kick()
+            }
+            wasPlayingBeforeAdjust = false
+        }
+        scriptView?.setAdjusting(areaAdjusting)
+        applyScriptTouchMode()
+        controlBar?.setAreaAdjusting(areaAdjusting)
+        Toast
+            .makeText(
+                overlayContext,
+                if (areaAdjusting) {
+                    "Drag the area to move it; drag a corner to resize"
+                } else {
+                    "Overlay area saved"
+                },
+                Toast.LENGTH_SHORT,
+            ).show()
+    }
+
+    private fun applyScriptTouchMode() {
+        val view = scriptView ?: return
+        val params = scriptParams ?: return
+        params.flags =
+            if (areaAdjusting) {
+                SCRIPT_FLAGS
+            } else {
+                SCRIPT_FLAGS or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            }
+        runCatching { windowManager.updateViewLayout(view, params) }
+    }
+
+    private fun changeOverlaySpeed(delta: Float) {
+        PrompterSession.nudgeSpeed(delta)
+        scriptView?.kick()
+        scriptView?.showStatus("${PrompterSession.speedWpm.roundToInt()} WPM")
     }
 
     private fun scriptLayoutParams(): WindowManager.LayoutParams =
@@ -217,20 +694,19 @@ class PrompterOverlayService : Service() {
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                SCRIPT_FLAGS or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
                 layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER
             }
 
-    private fun controlLayoutParams(): WindowManager.LayoutParams =
+    /** Window sized to the bar only — every tap outside it reaches the app below. */
+    private fun controlWindowParams(
+        x: Int,
+        y: Int,
+    ): WindowManager.LayoutParams =
         WindowManager
             .LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -241,26 +717,30 @@ class PrompterOverlayService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT,
             ).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                y = dp(64)
+                gravity = Gravity.TOP or Gravity.START
+                this.x = x
+                this.y = y
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER
             }
+
+    /** Forces a re-measure after the bar's measured size changed (collapse/expand/fades). */
+    private fun relayoutControlWindow() {
+        val host = controlHost ?: return
+        val params = controlParams ?: return
+        runCatching { windowManager.updateViewLayout(host, params) }
+    }
 
     private fun dragControls(
         dx: Float,
         dy: Float,
     ) {
         val bar = controlBar ?: return
-        val params = controlParams ?: return
-        params.x += dx.roundToInt()
-        params.y -= dy.roundToInt()
-        val barWidth = bar.width.coerceAtLeast(1)
-        val barHeight = bar.height.coerceAtLeast(1)
         val bounds = currentScreenBounds()
-        val maxX = ((bounds.first - barWidth) / 2f).roundToInt().coerceAtLeast(0)
-        val maxY = (bounds.second - barHeight - dp(8)).coerceAtLeast(0)
-        params.x = params.x.coerceIn(-maxX, maxX)
-        params.y = params.y.coerceIn(0, maxY)
-        windowManager.updateViewLayout(bar, params)
+        barX = (barX + dx).coerceIn(0f, (bounds.first - bar.width).coerceAtLeast(0).toFloat())
+        barY = (barY + dy).coerceIn(0f, (bounds.second - bar.height - navigationBarHeightPx()).coerceAtLeast(0).toFloat())
+        collapseEdgeRight = barX + bar.width / 2 >= bounds.first / 2
+        applyBarTranslation()
+        noteControlInteraction()
     }
 
     private fun currentScreenBounds(): Pair<Int, Int> =
@@ -301,28 +781,45 @@ class PrompterOverlayService : Service() {
         sampleHandler = handler
         latestSampleHandler = mainHandler
         val reader =
-            ImageReader.newInstance(
-                sampleWidth,
-                sampleHeight,
-                PixelFormat.RGBA_8888,
-                2,
-            )
+            try {
+                ImageReader.newInstance(
+                    sampleWidth,
+                    sampleHeight,
+                    PixelFormat.RGBA_8888,
+                    2,
+                )
+            } catch (error: RuntimeException) {
+                fallbackToManualContrast()
+                return
+            }
         reader.setOnImageAvailableListener({ availableReader ->
-            sampleAvailableImage(availableReader)
+            runCatching { sampleAvailableImage(availableReader) }
         }, handler)
         imageReader = reader
         virtualDisplay =
-            projection.createVirtualDisplay(
-                "teleprompter-contrast",
-                sampleWidth,
-                sampleHeight,
-                resources.displayMetrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.surface,
-                null,
-                handler,
-            )
+            try {
+                projection.createVirtualDisplay(
+                    "teleprompter-contrast",
+                    sampleWidth,
+                    sampleHeight,
+                    resources.displayMetrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    reader.surface,
+                    null,
+                    handler,
+                )
+            } catch (error: RuntimeException) {
+                fallbackToManualContrast()
+                return
+            }
+        if (virtualDisplay == null) {
+            fallbackToManualContrast()
+            return
+        }
         PrompterSession.updateProjectionActive(true)
+        // Refresh the notification so it shows the capture-specific title and
+        // the "Stop capture" action while projection is live.
+        startAsForeground(hasProjection = true)
         controlBar?.refresh()
     }
 
@@ -387,7 +884,27 @@ class PrompterOverlayService : Service() {
         return 0.5f
     }
 
+    /** Re-registers the foreground service WITHOUT the mediaProjection type after capture fails. */
+    private fun demoteForegroundWithoutProjection() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return
+        }
+        runCatching {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            ensureNotificationChannel()
+            val type =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                } else {
+                    0
+                }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
+        }
+    }
+
     private fun fallbackToManualContrast() {
+        releaseProjection()
+        demoteForegroundWithoutProjection()
         PrompterSession.updateProjectionActive(false)
         scriptView?.invalidate()
         controlBar?.refresh()
@@ -402,14 +919,19 @@ class PrompterOverlayService : Service() {
     }
 
     private fun releaseProjection() {
+        // 1. Quiesce the sampler thread first so no frame callback races the close.
+        sampleThread?.quitSafely()
+        sampleThread?.join(100)
+        sampleThread = null
+        sampleHandler = null
+        latestSampleHandler = null
+
+        // 2. Stop the virtual display, then drop the listener/reader.
         virtualDisplay?.release()
         virtualDisplay = null
         imageReader?.setOnImageAvailableListener(null, null)
         imageReader?.close()
         imageReader = null
-        sampleThread?.quitSafely()
-        sampleThread = null
-        sampleHandler = null
         mediaProjection?.let { projection ->
             projection.unregisterCallback(projectionCallback)
             projection.stop()
@@ -471,31 +993,76 @@ class PrompterOverlayService : Service() {
                 stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-        return NotificationCompat
-            .Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_teleprompter)
-            .setContentTitle("Teleprompter overlay active")
-            .setContentText("Transparent script is floating over other apps")
-            .setContentIntent(openPending)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(android.R.drawable.ic_media_play, "Play/pause", togglePending)
+        val captureActive = PrompterSession.projectionActive
+        val builder =
+            NotificationCompat
+                .Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_teleprompter)
+                .setContentTitle(
+                    if (captureActive) {
+                        "Screen capture active — adaptive contrast"
+                    } else {
+                        "Teleprompter overlay active"
+                    },
+                )
+                .setContentText(
+                    if (captureActive) {
+                        "Reading screen brightness on-device to keep the script readable"
+                    } else {
+                        "Transparent script is floating over other apps"
+                    },
+                )
+                .setContentIntent(openPending)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+                .addAction(android.R.drawable.ic_media_play, "Play/pause", togglePending)
+        if (captureActive) {
+            val stopCaptureIntent =
+                Intent(this, PrompterOverlayService::class.java)
+                    .setAction(ACTION_STOP_CAPTURE)
+            val stopCapturePending =
+                PendingIntent.getService(
+                    this,
+                    REQUEST_STOP_CAPTURE,
+                    stopCaptureIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+            builder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Stop capture",
+                stopCapturePending,
+            )
+        }
+        return builder
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPending)
             .build()
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(refreshRunnable)
+        mainHandler.removeCallbacks(squareSnapRunnable)
+        collapseAnimator?.cancel()
+        snapAnimator?.cancel()
+        collapseAnimator = null
+        snapAnimator = null
+        if (areaAdjusting) {
+            PrompterSession.persistOverlayArea()
+            PrompterSession.updateOverlayAreaAdjusting(false)
+            areaAdjusting = false
+        }
         releaseProjection()
-        controlBar?.let { bar ->
-            runCatching { windowManager.removeView(bar) }
+        controlHost?.let { host ->
+            runCatching { windowManager.removeView(host) }
         }
         scriptView?.let { view ->
             runCatching { windowManager.removeView(view) }
         }
         controlBar = null
+        controlHost = null
         scriptView = null
+        controlParams = null
+        PrompterSession.onOverlayAreaPreviewChanged = null
         PrompterSession.setPlayback(false)
         PrompterSession.updateOverlayRunning(false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -507,6 +1074,7 @@ class PrompterOverlayService : Service() {
     companion object {
         const val ACTION_START = "com.accessoryTools.teleprompter.action.START_OVERLAY"
         const val ACTION_STOP = "com.accessoryTools.teleprompter.action.STOP_OVERLAY"
+        const val ACTION_STOP_CAPTURE = "com.accessoryTools.teleprompter.action.STOP_CAPTURE"
         const val ACTION_TOGGLE_PLAY = "com.accessoryTools.teleprompter.action.OVERLAY_TOGGLE_PLAY"
         const val EXTRA_ADAPTIVE_CONTRAST = "adaptive_contrast"
         const val EXTRA_DISPLAY_ID = "overlay_display_id"
@@ -518,12 +1086,21 @@ class PrompterOverlayService : Service() {
         private const val REQUEST_OPEN = 10
         private const val REQUEST_TOGGLE = 11
         private const val REQUEST_STOP = 12
+        private const val REQUEST_STOP_CAPTURE = 13
         private const val SPEED_STEP = 10f
+        private const val CONTROL_COLLAPSE_DELAY_MS = 5_000L
+        private const val SQUARE_SNAP_DELAY_MS = 1_600L
         private const val SAMPLE_LONG_EDGE = 256
         private const val SAMPLE_PIXEL_STEP = 4
         private const val SAMPLE_INTERVAL_MS = 700L
         private const val LUMINANCE_BINS = 32
         private const val CONTROL_REFRESH_MS = 1_000L
+        private const val SCRIPT_FLAGS =
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
 
         fun start(
             context: Context,

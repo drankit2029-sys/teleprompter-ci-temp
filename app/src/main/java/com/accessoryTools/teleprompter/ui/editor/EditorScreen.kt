@@ -1,9 +1,12 @@
 package com.accessoryTools.teleprompter.ui.editor
 
 import android.net.Uri
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,14 +18,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -63,12 +67,26 @@ import com.accessoryTools.teleprompter.data.formatDuration
 import com.accessoryTools.teleprompter.data.readingSeconds
 import com.accessoryTools.teleprompter.data.wordCount
 import com.accessoryTools.teleprompter.prompter.PrompterSession
+import com.accessoryTools.teleprompter.ui.Neo
+import com.accessoryTools.teleprompter.ui.NeoPanel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val EditorWideBreakpoint = 900.dp
 private val EditorMaxWidth = 1320.dp
 private const val MAX_HISTORY = 100
+private const val MAX_HISTORY_BYTES = 2_000_000
+private const val MAX_MATCH_COUNT = 999
+
+private fun trimmedHistory(list: List<String>): List<String> {
+    var bytes = list.sumOf { it.length }
+    var trimmed = list
+    while (trimmed.size > MAX_HISTORY || bytes > MAX_HISTORY_BYTES) {
+        bytes -= trimmed.first().length
+        trimmed = trimmed.drop(1)
+    }
+    return trimmed
+}
 
 private enum class SaveStatus(
     val label: String,
@@ -122,25 +140,35 @@ fun EditorScreen(
             uri?.let { export(markdown = false, it) }
         }
 
+    var lastUndoPushMillis by remember { mutableStateOf(0L) }
+
     fun applyEdit(newContent: String) {
         if (newContent == content) {
             return
         }
-        undoStack = (undoStack + content).takeLast(MAX_HISTORY)
+        val now = SystemClock.uptimeMillis()
+        val endsWord =
+            newContent.isNotEmpty() &&
+                newContent.last().isWhitespace() &&
+                (content.isEmpty() || !content.last().isWhitespace())
+        if (endsWord || now - lastUndoPushMillis >= 350L) {
+            undoStack = trimmedHistory(undoStack + content)
+            lastUndoPushMillis = now
+        }
         redoStack = emptyList()
         content = newContent
     }
 
     fun undo() {
         val previous = undoStack.lastOrNull() ?: return
-        redoStack = (redoStack + content).takeLast(MAX_HISTORY)
+        redoStack = trimmedHistory(redoStack + content)
         undoStack = undoStack.dropLast(1)
         content = previous
     }
 
     fun redo() {
         val next = redoStack.lastOrNull() ?: return
-        undoStack = (undoStack + content).takeLast(MAX_HISTORY)
+        undoStack = trimmedHistory(undoStack + content)
         redoStack = redoStack.dropLast(1)
         content = next
     }
@@ -196,7 +224,7 @@ fun EditorScreen(
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets.safeDrawing,
+        contentWindowInsets = WindowInsets.systemBars,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             EditorTopBar(
@@ -326,20 +354,27 @@ private fun EditorTopBar(
     onExportText: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(modifier = modifier, color = MaterialTheme.colorScheme.surface) {
+    Surface(
+        modifier = modifier.border(3.dp, Neo.Ink),
+        color = Neo.Yellow,
+    ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            modifier = Modifier.fillMaxWidth().systemBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.background(Neo.Paper).border(3.dp, Neo.Ink),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Neo.Ink)
             }
-            Column(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
                 Text(
-                    text = "Edit script",
+                    text = "EDIT SCRIPT",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Black,
+                    color = Neo.Ink,
                 )
                 Text(
                     text = saveStatus.label,
@@ -348,7 +383,7 @@ private fun EditorTopBar(
                         if (saveStatus == SaveStatus.ERROR) {
                             MaterialTheme.colorScheme.error
                         } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                            Neo.Ink.copy(alpha = 0.72f)
                         },
                 )
             }
@@ -393,9 +428,12 @@ private fun EditorBottomBar(
     onPresent: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(modifier = modifier, color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
+    Surface(
+        modifier = modifier.border(3.dp, Neo.Ink),
+        color = Neo.White,
+    ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            modifier = Modifier.fillMaxWidth().systemBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -464,22 +502,25 @@ private fun StatsCard(
     characters: Int,
     duration: String,
 ) {
-    Surface(
+    NeoPanel(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
+        color = Neo.White,
+        contentPadding = 18.dp,
     ) {
-        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             Text(
-                text = "Script statistics",
+                text = "SCRIPT STATISTICS",
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Black,
             )
             StatRow("Words", words.toString())
             StatRow("Characters", characters.toString())
             StatRow("Read time", duration)
             StatRow("Pace", "${PrompterSession.speedWpm.toInt()} wpm")
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+            HorizontalDivider(color = Neo.Ink)
             Text(
                 text = "Autosave keeps changes on this device. Present saves before opening the prompter.",
                 style = MaterialTheme.typography.bodySmall,
@@ -536,7 +577,9 @@ private fun FindReplaceCard(
         remember(find, caseSensitive.value) {
             if (find.isEmpty()) null else Regex(Regex.escape(find), options)
         }
-    val matchCount = remember(regex, content) { regex?.findAll(content)?.count() ?: 0 }
+    // Cap counting work so a short pattern on a huge document can't block the UI per keystroke.
+    val matchCount = remember(regex, content) { regex?.findAll(content)?.take(MAX_MATCH_COUNT + 1)?.count() ?: 0 }
+    val matchLabel = if (matchCount > MAX_MATCH_COUNT) "$MAX_MATCH_COUNT+" else matchCount.toString()
 
     fun replaceFirst() {
         val match = regex?.find(content) ?: return
@@ -548,24 +591,27 @@ private fun FindReplaceCard(
         onContentChange(current.replace(content) { replacement })
     }
 
-    Surface(
+    NeoPanel(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
+        color = Neo.White,
+        contentPadding = 18.dp,
     ) {
-        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Find and replace",
+                    text = "FIND AND REPLACE",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Black,
                 )
                 Text(
-                    text = "$matchCount matches",
+                    text = "$matchLabel matches",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

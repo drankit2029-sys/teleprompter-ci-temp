@@ -4,3 +4,12 @@ local.properties
 .idea/
 *.iml
 .kotlin/
+
+# Release signing material — never commit.
+keystore/
+keystore.properties
+
+# Exported agent session transcripts and scratch images.
+session-*.md
+*.jpeg
+.env

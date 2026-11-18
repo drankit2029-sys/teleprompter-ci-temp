@@ -28,6 +28,28 @@ Full plan: `plan.md`.
 **Phase 1 — library, editor, import, export: complete. Checkpoint `checkpoint/phase-1` created.**
 **Phase 2 — prompter core: complete. Checkpoint `checkpoint/phase-2` created.**
 
+**Phase 5b — polish, overlay region, AdMob test ads, and neo-brutalist UI: implemented, not yet accepted.**
+
+- Word-safe wrapping is now hyphen-aware (explicit `WordWrap`), shared by the
+  Compose stage and the overlay `StaticLayout`.
+- Overlay region selection/resizing is persisted as normalized fractions, with
+  a Stage → Window live preview, presets, in-overlay handles, and live updates
+  of a running overlay.
+- The overlay control bar fits 360dp displays and now auto-collapses into a
+  "TP" square pinned to the nearest vertical edge after 5s of inactivity
+  (skipped during area adjustment); tapping the square reexpands the bar.
+- AdMob test ads: banners are a 60dp inline-adaptive slot labelled
+  `ADVERTISEMENT`, 10% of screen height on narrow phones, rotating every 30s
+  only while their host is resumed, and never outside Library/Settings.
+- Interstitials are policy-hardened: they show **before** the stage→library
+  break page (never on app exit or after a page load), at most once per two
+  stage-exit actions with a 60s minimum interval, and are skipped during
+  PiP/overlay/lock/background. Google's AdMob guidance was consulted; the
+  "two user actions" rule is unit-tested.
+- Neo-brutalist Library/Settings/Editor/Stage/overlay restyle is implemented;
+  scrcpy verification is ongoing; main-display overlay/camera acceptance and
+  the acceptance commit are still pending.
+
 Phase 0 acceptance completed on the physical target:
 
 - Fullscreen stage verified: playback, progress/position readout, restart,
@@ -261,6 +283,22 @@ with the user present):
     only, so secondary displays use manual colors. Secondary-display stages also
     keep system bars visible, preserving Back/Home/Recents; the main display
     keeps its immersive stage.
+28. **Banner ads are isolated and separated.** Library/Settings show a 60dp
+    inline-adaptive banner in a bordered `ADVERTISEMENT` frame (one AdView
+    reused per width, fresh request every 30s only while the host is resumed);
+    the slot is hidden during imports/pastes/backups/restores and never
+    appears in the editor, stage, PiP, or the transparent overlay.
+29. **Interstitials are a page-break ad, not a page-load ad.** They are shown
+    before Navigation pops the stage to the library, never on app exit and
+    never after the library is returned. `InterstitialGate` enforces at least
+    two stage-exit actions between ads and a 60s minimum interval, and the ad
+    is skipped when recording-like behavior (PiP, overlay, lock, background)
+    is active. Google's "at most one interstitial after every two user
+    actions" rule is enforced in `ads/InterstitialGate.kt` and unit-tested.
+30. **Overlay controls are self-cleaning.** The floating control bar collapses
+    into a "TP" square after 5s of inactivity and pins to the nearest vertical
+    screen edge; tapping the square reexpands the bar. Collapse is skipped
+    while the overlay area is being adjusted so the adjust UI is not hidden.
 
 ## Phase 0 implementation map
 
@@ -488,4 +526,281 @@ git switch -c recover-phase-0 checkpoint/phase-0
   0:00, 3s countdown, loop off, keep-awake on, warm/black,
   sans/medium/center, mirrors off, adaptive contrast on; verified on a fresh
   scrcpy display. Phase 2 accepted; `checkpoint/phase-2` created.
+- 2026-11-13 — Phase 5b implemented: hyphen-aware `WordWrap` (preferred
+  hyphen break points for overlong compounds), 60dp inline-adaptive Library
+  and Settings banners (`ADVERTISEMENT` label, resumed-only 30s rotation),
+  policy-hardened interstitial (before the stage→library break page,
+  `InterstitialGate` requires ≥2 stage-exit actions and ≥60s between ads,
+  skipped during PiP/overlay/lock/background), and an auto-collapsing overlay
+  control bar that pins a "TP" square to the nearest vertical edge after 5s
+  of inactivity (reexpand on tap; collapse skipped during area adjustment).
+  Verified on a scrcpy 720×1600/320 display: Top-area preset persists across
+  restart, interstitial fires on the second exit (and not on a fast double
+  exit within 60s), interstitial is skipped while the overlay runs, and full
+  phone lint + ktlint pass. Main-display overlay/camera acceptance and the
+  acceptance commit remain.
 
+- 2026-11-14 — Reported-bug fixes: inline overlay speed-status chip replaces the
+  rate-limited Toast (control bar now register taps reliably); both stage
+  and overlay renderers top-align the script; stage panel is resizable via a
+  grip on its top edge; the overlay-area editor only consumes gestures
+  starting on the region/handles so the Window tab can scroll to the very
+  bottom; editor lifts content and Present bar above the IME with
+  `imePadding()`; landscape/short-height Library uses a scrollable
+  full-width adaptive grid; banner sits above the navigation bar and the
+  overlay window respects the display cutout. Verification (main display,
+  tablet matrix) pending with the user; commit pending acceptance.
+
+- 2026-11-14 — Audit-fix round applied and re-verified on device: ~24 fixes
+  from the two audit passes (see `docs/bug-report.md`). Compose stage RIGHT
+  alignment is now physical `TextAlign.Right`. Trash is purged after 30 days
+  on repository init; the library cache is updated incrementally on save
+  (no more O(library) re-parse); interstitial budget burns only when the ad
+  actually shows; the banner degrades to "Advertisement unavailable" on SDK
+  init failure; unreadable preset combos (BLACK+INK, PAPER+light text) are
+  filtered from the pickers; editor undo is debounced to word boundaries;
+  sort/favorites prefs write atomically via `rememberUpdatedState`.
+  Verified: scrcpy virtual display (1080x2400/420) for Look/Text tabs,
+  translucent panel, banner rotation; main display + uiautomator dump for
+  RTL Arabic stage rendering (correct bidi, word-safe wrap), Right alignment,
+  banner label, library resume. RTL seed script removed afterwards —
+  library holds 7 scripts. NOT device-verified: HSV custom-color picker and
+  SAF custom-font import end-to-end; Phase 5a interstitial fired-on-second-exit
+  only re-checked via unit test on this round. Full `check.sh --full-lint`
+  re-run passed on the phone (lintDebug clean, ktlint clean). Main-display camera/overlay
+  acceptance and the acceptance commit remain with the user.
+- 2026-11-15 — Play Store screenshot round (not final): normal-library.png and
+  normal-stage.png (693-word demo script) are good. compact-stage.png shows an
+  empty script at 10%; 7in-stage.png accidentally captured the launcher
+  wallpaper; 10in-stage.png accidentally captured the editor (empty script,
+  find/replace panels). compact/7in/10in stage shots must be re-captured with
+  the 693-word script before the listing is usable. Displays: TP-playstore-
+  normal (117), TP-playstore-compact (118), TP-playstore-7in (119),
+  TP-playstore-10in (120); scrcpy sessions still running. Multi-agent
+  coordination via /mnt/Storage/Projects/talk.txt (agents: TCAgent-done,
+  AtlasAgent-AnatomyAtlas AVDs/KVM-blocked, Quill-teleprompter, TP-* window
+  titles). Phone drops its Termux sshd intermittently — after a reboot or
+  Termux kill, run `sshd` in Termux before build-on-phone works.
+- 2026-11-15 — Overlay control bar root-cause fix (implemented, NOT yet
+  device-verified): the expand animation pinned the control window at integer
+  widths and never reliably re-grew it, so Stop never drew and Area was
+  clipped (user report, reproduced on main display in landscape). Fix: the
+  window is now always WRAP_CONTENT; the collapse/expand animates only x and
+  the crossfade; expand measures the natural width for the x clamp; the
+  once-a-second force-WRAP_CONTENT heal remains as a safety net.
+  compileDebugKotlin green; build-on-phone blocked until Termux sshd restarts.
+- 2026-11-15 — New script buttons made rectangular (`RoundedCornerShape(0)` +
+  matching black border, matching neo-brutalist squared corners) across FAB,
+  portrait toolbar inline button, tablet rail button and empty-state button;
+  FAB hidden on phones (inline toolbar "New script" takes over); Import/Paste
+  moved onto the same row as New script (single weighted row, text no longer
+  clipped); stray FlowRow vertical divider removed; ad banner `clipToBounds()`;
+  banner rotation deferred while the library list is scrolling.
+- 2026-11-15 — Overlay control bar RE-ENGINEERED: control window is now a
+  full-screen touch-pass-through canvas (FLAG_NOT_TOUCH_MODAL) and the bar
+  child moves via translationX/Y — no WindowManager relayout per animation
+  frame (was: updateViewLayout every frame → janky + the "Stop clipped /
+  fixed-width" failure mode; now structurally impossible). Collapse/expand
+  still auto-snap to nearest vertical edge at 5 s idle. Device-verified on the
+  main display (portrait): all seven controls render, TP square pins to the
+  edge, expand restores the bar. Smoothness of the animation needs the user's
+  eye. Note: phone drops `adb` constantly and the task keeps `mDisplayId` of
+  dead virtual displays — relaunch with `am start --display 0` to rescue it.
+- 2026-11-15 — Script scrubbing improved: dragging the script text with a
+  finger now flings with inertia (e.g. a fast flick scrolls on after release
+  and decelerates like a list); position slider changes chase the thumb with
+  a 150 ms ease instead of stepping. Verified via adb swipe: 0:40 → 0:52 after
+  one flick, decays to a stop; position restore/lerp paths unchanged (big jumps
+  still snap). Note: phone mounts show the teleprompter task at `mDisplayId=131`
+  (dead virtual display) after reinstalls — `am start --display 0` moves it back.
+- 2026-11-15 — MULTI-INSTANCE debug flavors added: `agentOne..agentFour`
+  (applicationIdSuffix .agent1..4, each with its own `app_name` via flavor
+  `strings.xml`, no buildFeature flags — resValue in flavors is blocked by
+  AGP without an experimental flag). `base` is the default flavor used by
+  build-on-phone (`assembleBaseDebug` / `lintBaseDebug`). All four agents
+  build and run CONCURRENTLY on separate virtual displays (user 0, Samsung
+  blocks new user types; Secure Folder denies shell; task is single-instance
+  per package). Each seeds the Demo script. Agent APKs live in
+  `app/build/outputs/apk/agent*/debug/`.
+- 2026-11-15 — Library verification at 4 classes × portrait captured to
+  `screenshots/` (play-store candidate shots, NOT yet final; banner shows
+  test ad). Stage captures by parallel subagents (one per class). scrcpy
+  displays die unpredictably on this phone (all wiped at ~22:20); recreate
+  with --new-display and re-map displayId/SFID each session.
+- 2026-11-15 — Stage text-under-panel bug FIXED: PrompterStage + the
+  drag-to-scrub gesture Box are now constrained to the script column when the
+  side panel is used (was: full width, text centered under the panel and
+  clipped at its edge — visible on Expanded 10in portrait). Rebuild + reinstall
+  of all agent flavors done; base build pending on-phone rebuild via
+  build-on-phone. Note the 4 screenshot library shots in `screenshots/` were
+  taken with the agent builds; the 10in portrait stage shot was taken BEFORE
+  this fix (shows the clipping) — re-shoot on a portrait display to verify.
+- 2026-11-16 (after server restart) — All 16 screenshots in `screenshots/`
+  (4 classes × 2 orientations × library+stage) are DONE, incl. the corrected
+  10in-portrait stage (text constrained to the script column, clear of the
+  side panel — the earlier capture showed the clipping bug). 10in-landscape
+  stage confirmed with ~240px of black clearance between text and panel.
+  build-on-phone fixed to detect applicationId only from lines matching
+  `applicationId =` (was matching applicationIdSuffix → "invalid applicationId
+  detected: '.agent1'"). Phone base rebuild BLOCKED again: Termux sshd died
+  (server restart) — user must run `sshd` in Termux once more before
+  build-on-phone works. One TP-shot-10in-portrait scrcpy window left open.
+- 2026-11-16 — Overlay PNGs + tablet panel default expansion fix. Overlay shots
+  captured with the agent1 build (base app still unreinstallable — Termux sshd
+  dead): `overlay-home.png` (bus-tram launcher wallpaper) and `overlay-web.png`
+  (en.wikipedia.org/wiki/Teleprompter, manual-contrast white text + outline,
+  legible over bright content) — both show the draggable bar EXPANDED (full
+  controls: drag handle, teal play, restart, −5s/+5s, Area, S, magenta Stop).
+  Removed two rejected shots (Settings backdrop shows NO overlay — Android
+  force-hides non-system overlays on sensitive screens
+  [mIsForceHiddenNonSystemOverlayWindow, e.g. Samsung Settings]; Play Store
+  backdrop showed "Item not found" — not suitable for store assets). Overlay
+  STOPPED afterwards via `am force-stop` of agent1 (cleanup). NOTE: plain
+  `adb shell input tap` routes to the FOCUSED display, NOT display 0 — with the
+  phone screen off (display 0 no focused window) taps landed on the scrcpy
+  tablet (agent4); use `input -d 0` for the main screen. Physical screen now
+  awake (12:00); Chrome left on the Wikipedia article.
+- 2026-11-16 — Stage control panel DEFAULT expansion now hugs the controls
+  (was fixed 0.46/0.66 fraction leaving a large dead area below the controls
+  on tablet portrait): bottom panel Surface uses
+  `heightIn(max = panelMaxHeight)` (resizable cap kept via the top grip) and
+  the scrollable tab body uses `weight(1f, fill = false)` (fills remaining cap
+  but keeps natural height otherwise). 7in (1200x1920) and 10in (1600x2560)
+  portrait verified — panel ends flush after the Keep awake row; normal/
+  compact (phones) content exceeds the cap → unchanged (cap + footer scroll).
+  Portrait stage PNGs re-shot for all four classes with the fix (landscape
+  untouched — side panel). Base build on the phone still pending Termux sshd.
+- 2026-11-16 — build-on-phone re-ran successfully (Termux sshd restored by user):
+  base app on the phone now carries ALL of today's fixes (portrait bottom panel
+  always-portrait, panel hugs controls on tablets, overlay work). Note: adb
+  dropped the phone once mid-session (Samsung MTP mode) — `adb reconnect`
+  recovered it; use `-s RZCY61Z8TPD` everywhere (emulator-5554 present, never
+  touch). If display 0 has NO focused window (screen off / user away), plain
+  `input tap` is routed to the focused VIRTUAL display, not display 0 — always
+  pass `-d 0` (or the target display id).
+- 2026-11-16 — Overlay PNGs with the bar EXPANDED captured on ALL FOUR device
+  classes (virtual displays): overlay-normal.png (162, agent2),
+  overlay-compact.png (160, agent3), overlay-7in.png (161, agent4),
+  overlay-10in.png (163, agent1). Backdrop = launcher (virtual displays render
+  the launcher fine). Agent POST_NOTIFICATIONS + SYSTEM_ALERT_WINDOW were
+  pm-granted/appops-granted by shell (no phone interaction needed); permission
+  dialogs that remain (e.g. notification prompt) were answered on-screen.
+  Non-system overlays are force-hidden by the platform on sensitive screens
+  (Samsung Settings) — cannot be captured there.
+- 2026-11-16 — ADAPTIVE CONTRAST shot: overlay-adaptive.png — dark script text
+  on the bright Wikipedia article, red projection indicator in the status bar,
+  bar expanded, no ads. OneUI 7 MediaProjection flow notes: the consent sheet
+  has a DROPDOWN ("Share one app"/"Share entire screen") — blind-tapping app
+  tiles must be AVOIDED (they are share targets); pick "Share entire screen"
+  then tap the confirmation button ("Share screen"). Projection was stopped
+  after the shot (force-stop agent1). Chrome left on the Wikipedia article.
+- 2026-11-16 — Ads removed from the STORE SCREENSHOTS (PNGs): the ad banner box
+  (ADVERTISEMENT label + Test Ad, full-width black-bordered box) was detected by
+  its side borders in all 8 library PNGs and filled with the library background
+  (245,245,220); nav bar + gesture pill below the banners left intact;
+  verification: zero residual dark pixels in the erased bands, backups in
+  /tmp/opencode/screenshots-backup/. The app ITSELF still shows test ads — if
+  ad-free app testing is wanted, that needs a code/config change (not done).
+- 2026-11-16 — Ad-free store screenshots via build flag (NOT byte edits):
+  `AD_FREE` buildConfigField added (defaultConfig=false; agentOne..agentFour=true,
+  base keeps ads). Guards: BannerAdSlot returns nothing, MobileAds.initialize is
+  skipped, InterstitialAds.preload/maybeShow no-op. Verified on display 168 with
+  the fresh agent build — library shows NO banner/ADVERTISEMENT label at all.
+  Stage/overlay screens never had ads. NOTE: adb dropped the phone mid-run
+  (Samsung MTP / USB flaky again) and later the phone vanished from lsusb
+  entirely — device-side capture of the FEATURE screenshot set is BLOCKED until
+  the phone is reconnected. The 4 recreated virtual displays (166/167/168/169;
+  normal/compact/7in/10in) died with the USB drop — recreate with --new-display
+  after the phone is back. emulator-5556 is present and was NOT used.
+- 2026-11-16 (crash-recovery session) — Resumed from the exported
+  session-c91230ab export (crashed on inline media limits) on the same four
+  virtual displays (171 normal/agent2, 174 compact/agent3, 173 7in/agent4,
+  172 10in/agent1; scrcpy windows TP-shot-* still alive).
+  Feature screenshot set captured on normal class (1080x2340, display 171):
+  settings.png + settings-backup-restore.png; editor.png, editor-menu.png,
+  editor-find-replace.png; stage-playback.png, stage-text.png,
+  stage-text-fonts.png, stage-look.png, stage-look-2.png, stage-window.png,
+  stage-window-overlay-area.png (overlay-area editor with magenta handles),
+  stage-countdown.png (3s), stage-locked.png, stage-mirror.png, stage-end.png,
+  pip.png (PiP WORKS on the virtual display: narrow window over launcher;
+  note tapping the PiP window did not restore — use `am start --display <id>`),
+  library-search.png, library-favorites.png.
+  IMPORTANT coordinate note: after scrolling the Look tab, the Mirror <-> /
+  Mirror <-> buttons sit at actual y 1970-2074 (centres ~(289,2021) and
+  (790,2021)); the earlier tap at y~1939 missed and produced a false "mirror"
+  shot. Correct shot verified — text is visibly reversed.
+  Refreshed all four portrait library PNGs from the ad-free builds
+  (normal/compact/7in/10in) — verified no banner/ad label. The compact
+  full-width dark rows at y~1047 are the Demo card's bottom border (not an ad).
+  uiautomator dumps were unusable while the user actively used display 0
+  (returned io.skooped.app / com.devquiz.app) — used screencap+PIL only.
+  7in + compact feature-view variants delegated to two subagents.
+- 2026-11-16 (overlay/edge-case hardening, static review + fixes):
+  Double-start overlay = re-entrant `onStartCommand`; views used to stay attached
+  to the OLD WindowManager while context/metrics moved (leaks + BadToken paths).
+  Fixes: teardown-then-rebuild on display change; addView wrapped (failure rolls
+  back, toast, stopSelf, overlayRunning=false); startForeground guarded;
+  non-adaptive re-start now calls releaseProjection(); projection creation
+  guarded (ImageReader/createVirtualDisplay nullable + try/catch) and on failure
+  the FGS is demoted to SPECIAL_USE via stopForeground/startForeground; Studio
+  button now launches on the overlay's display; missing requested display =
+  toast + stopSelf; sampler join 500->100ms; image listener wrapped in
+  runCatching. Data layer: script temp files SAME NAME race -> UUID temp files;
+  _scripts merge now atomic flow update{}; backup id path traversal -> id
+  pattern allow-list + sha256 fallback in scriptFile; NaN lastPosition/settings
+  (speed/font/focus/edge/margin/lineSpacing/OverlayArea) finite-guarded;
+  empty script Play is a no-op; restore writes per-entry runCatching + id+content
+  dedupe only; SettingsRepository reads/writes finite-sanitized, flushPrompterSettings()
+  on ON_PAUSE; DataStore failures logged; editor undo history capped (100 entries
+  / 2 MB); find/replace counting capped at 999; scrub locked mid-gesture ->
+  scrubbing reset via LaunchedEffect(locked). Build + unit tests green.
+  NOT touched: allowBackup=true (flagged to user, product decision), wordCount
+  per-edit cost (perf only), library backup allowBackup.
+- 2026-11-16 — Base app on the phone rebuilt on THIS build machine via
+  Termux sshd (assembleBaseDebug, 2m24s) and pm-installed (pm install -r,
+  data preserved). No visual/layout changes shipped: hardening = failure
+  handling + state integrity only (idempotent double-start, view rollback,
+  projection release/demote, Studio launches on overlay display, NaN/backup
+  guards, bounded undo, scrub-lock fix, full-area touch passthrough).
+  App NOT force-relaunched (user was mid-use in Dev-Quiz).
+- 2026-11-17 — Main-screen (display 0) overlay hardening: control window was a
+  MATCH_PARENT transparent canvas swallowing all touches (only FLAG_NOT_TOUCH_MODAL,
+  which Samsung/One UI disregards). Changed PrompterOverlayService to a
+  WRAP_CONTENT window pinned to barX/barY (relayout per frame during drags/
+  animations; relayoutControlWindow() on size changes; teardown sets
+  controlParams=null). Bar clipping off the right edge on sw384dp/450dpi seen
+  in both builds (never fully verified). Display-0 full-cycle overlay test in
+  progress (pass-through unverified at this point). Also: adaptive brightness
+  was still on (mode=1) so brightness-0 requests were ignored; fixed with
+  screen_brightness_mode=0, screen stays awake, no keyguard.
+- 2026-11-17 (night) — Main-screen (display 0) overlay verification PASSED on the
+  wrap-content build (installed same day): overlay launches, 2 overlay windows,
+  app backgrounds as designed; touch pass-through works both ways (launcher
+  Gallery icon opened through the running overlay; in-app +5s advanced 0:00->0:01);
+  in-app Stop overlay stops service+windows cleanly; start->stop->start->stop cycle
+  clean; Screen capture of display 0 verified working at brightness 0 + adaptive
+  brightness OFF (screen_brightness_mode=0) — note the screen still glows even at
+  1 nit; KEYCODE_SLEEP (223) really sleeps the panel and screencap returns pure
+  black with the panel off (224 wakes) — do NOT sleep the display during capture
+  sessions. screen_off_timeout restored to 30000; adaptive contrast restored ON.
+  Unresolved: the overlay bar clips beyond the right edge on this 384dp/450dpi
+  screen (both builds) — pre-existing overflow, needs a bar-size decision.
+  Unverified: adaptive-contrast mediProjection roundtrip on this device (consent
+  sheet requires interactive user).
+- 2026-11-17 (later) — Google Chrome stayed open on the Wikipedia article;
+  adaptive-contrast consent sheet driven by coordinates (uiautomator cannot
+  dump the system sheet): "Share one app" dropdown -> "Share entire screen"
+  -> "Share screen" button. Adaptive MEDIAPROJECTION roundtrip verified:
+  overlay runs, REC indicator in status bar, bar stays interactive. OVERLAY
+  BAR OVERFLOWS display 0 on this 384dp/450dpi phone: all 7 buttons + handle
+  render past the right edge (Stop unreachable). Fix: compact minWidth
+  44dp -> 40dp (handle 44 -> 40). Adaptive contrast codepath confirmed alive
+  on-device (system consent -> projection -> overlay running with AUTO chip).
+- 2026-11-17 (later yet) — Test residue cleaned: app force-stopped; overlay windows=0,
+  service=0. Adaptive-contrast ON-DEVICE verification FAILED TO COMPLETE — the user
+  is actively multitasking across Recall / Anatomy Atlas / Teleprompter on display 0
+  during testing; each foreground attempt races the user's own app switching and the
+  MediaProjection consent; the last attempt showed pid empty / windows 0 / Modiium
+  app died silently in the background (system memory). Adaptive contrast remains
+  UNVERIFIED on this device. Verified-but-complete on-device: overlay launch, bar
+  (40dp compact fits width), pass-through, stop/idempotency.

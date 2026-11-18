@@ -1,5 +1,6 @@
 package com.accessoryTools.teleprompter.prompter
 
+import android.animation.ValueAnimator
 import android.os.CountDownTimer
 import android.view.Choreographer
 import androidx.compose.runtime.getValue
@@ -7,6 +8,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.accessoryTools.teleprompter.data.OverlayArea
 import com.accessoryTools.teleprompter.data.StageAlignment
 import com.accessoryTools.teleprompter.data.StageBackground
 import com.accessoryTools.teleprompter.data.StageFont
@@ -16,7 +18,6 @@ import com.accessoryTools.teleprompter.data.StageWeight
 import com.accessoryTools.teleprompter.data.argb
 import com.accessoryTools.teleprompter.data.wordCount
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 object PrompterSession {
     private val WHITE = StageTextColor.WHITE.argb
@@ -28,6 +29,8 @@ object PrompterSession {
     private const val DARK_OUTLINE = 0xE6000000.toInt()
     private const val LIGHT_OUTLINE = 0xE6FFFFFF.toInt()
     private const val FRAME_SECONDS_LIMIT = 0.1f
+    private const val FLING_DECELERATION = 5500f
+    private const val FLING_MIN_START = 120f
 
     val demoScript =
         listOf(
@@ -89,7 +92,7 @@ object PrompterSession {
     var fontSizeSp by mutableFloatStateOf(46f)
         private set
 
-    var focusFraction by mutableFloatStateOf(0.5f)
+    var focusFraction by mutableFloatStateOf(0.3f)
         private set
 
     var gradientEdgeAlpha by mutableFloatStateOf(0.28f)
@@ -114,6 +117,18 @@ object PrompterSession {
         private set
 
     var backgroundPreset by mutableStateOf(StageBackground.BLACK)
+        private set
+
+    var customTextArgb by mutableIntStateOf(0xFFF7F4EC.toInt())
+        private set
+
+    var customBackgroundArgb by mutableIntStateOf(0xFF000000.toInt())
+        private set
+
+    var panelTranslucent by mutableStateOf(false)
+        private set
+
+    var customFontFile by mutableStateOf<String?>(null)
         private set
 
     var mirrorHorizontal by mutableStateOf(false)
@@ -146,6 +161,12 @@ object PrompterSession {
     var overlayRunning by mutableStateOf(false)
         private set
 
+    var overlayArea by mutableStateOf(OverlayArea.FULL)
+        private set
+
+    var overlayAreaAdjusting by mutableStateOf(false)
+        private set
+
     var lastContrastLuminance by mutableFloatStateOf(-1f)
         private set
 
@@ -157,6 +178,9 @@ object PrompterSession {
 
     private var defaultSpeedWpm = 140f
     private var defaultFontSizeSp = 46f
+    private var flingVelocity = 0f
+    private var flingActive = false
+    private var seekAnimator: ValueAnimator? = null
 
     private val choreographer by lazy { Choreographer.getInstance() }
     private var frameScheduled = false
@@ -167,12 +191,14 @@ object PrompterSession {
 
     var onPrompterSettingsChanged: ((speedWpm: Float, fontSizeSp: Float, adaptiveContrast: Boolean) -> Unit)? = null
     var onStageSettingsChanged: ((StageSettings) -> Unit)? = null
+    var onOverlayAreaChanged: ((OverlayArea) -> Unit)? = null
+    var onOverlayAreaPreviewChanged: ((OverlayArea) -> Unit)? = null
 
     private val frameCallback =
         object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
                 frameScheduled = false
-                if (!isPlaying) {
+                if (!isPlaying && !flingActive) {
                     return
                 }
                 val deltaSeconds =
@@ -183,8 +209,11 @@ object PrompterSession {
                             .coerceIn(0f, FRAME_SECONDS_LIMIT)
                     }
                 lastFrameNanos = frameTimeNanos
+                if (flingActive) {
+                    advanceFling(deltaSeconds)
+                }
                 advance(deltaSeconds)
-                if (isPlaying) {
+                if (isPlaying || flingActive) {
                     scheduleFrame()
                 }
             }
@@ -192,6 +221,11 @@ object PrompterSession {
 
     fun setPlayback(playing: Boolean) {
         cancelCountdown()
+        if (playing && script.isBlank()) {
+            // Nothing to scroll — treat Play as a no-op instead of idling forever.
+            isPlaying = false
+            return
+        }
         if (playing && isAtEnd) {
             offsetPx = 0f
             isAtEnd = false
@@ -257,7 +291,7 @@ object PrompterSession {
         offsetPx = 0f
         contentHeightPx = 0f
         lastLayoutContentHeight = 0f
-        pendingStartProgress = startProgress.coerceIn(0f, 1f)
+        pendingStartProgress = if (startProgress.isFinite()) startProgress.coerceIn(0f, 1f) else 0f
         isPlaying = false
         isAtEnd = false
         locked = false
@@ -275,8 +309,8 @@ object PrompterSession {
         fontSizeSp: Float,
         adaptiveContrast: Boolean,
     ) {
-        defaultSpeedWpm = speedWpm.coerceIn(StageSettings.MIN_WPM, StageSettings.MAX_WPM)
-        defaultFontSizeSp = fontSizeSp.coerceIn(StageSettings.MIN_FONT_SP, StageSettings.MAX_FONT_SP)
+        defaultSpeedWpm = if (speedWpm.isFinite()) speedWpm.coerceIn(StageSettings.MIN_WPM, StageSettings.MAX_WPM) else 140f
+        defaultFontSizeSp = if (fontSizeSp.isFinite()) fontSizeSp.coerceIn(StageSettings.MIN_FONT_SP, StageSettings.MAX_FONT_SP) else 46f
         this.speedWpm = defaultSpeedWpm
         this.fontSizeSp = defaultFontSizeSp
         adaptiveContrastEnabled = adaptiveContrast
@@ -295,6 +329,10 @@ object PrompterSession {
         stageAlignment = sanitized.alignment
         textColorPreset = sanitized.textColor
         backgroundPreset = sanitized.background
+        customTextArgb = sanitized.customTextArgb
+        customBackgroundArgb = sanitized.customBackgroundArgb
+        panelTranslucent = sanitized.panelTranslucent
+        customFontFile = sanitized.customFontFile
         mirrorHorizontal = sanitized.mirrorHorizontal
         mirrorVertical = sanitized.mirrorVertical
         countdownSeconds = sanitized.countdownSeconds
@@ -315,6 +353,10 @@ object PrompterSession {
             alignment = stageAlignment,
             textColor = textColorPreset,
             background = backgroundPreset,
+            panelTranslucent = panelTranslucent,
+            customTextArgb = customTextArgb,
+            customBackgroundArgb = customBackgroundArgb,
+            customFontFile = customFontFile,
             mirrorHorizontal = mirrorHorizontal,
             mirrorVertical = mirrorVertical,
             countdownSeconds = countdownSeconds,
@@ -333,6 +375,7 @@ object PrompterSession {
     }
 
     fun updateSpeedWpm(value: Float) {
+        if (!value.isFinite()) return
         speedWpm = value.coerceIn(StageSettings.MIN_WPM, StageSettings.MAX_WPM)
         persistPrompterSettings()
         notifyStageSettingsChanged()
@@ -343,6 +386,7 @@ object PrompterSession {
     }
 
     fun updateFontSizeSp(value: Float) {
+        if (!value.isFinite()) return
         fontSizeSp = value.coerceIn(StageSettings.MIN_FONT_SP, StageSettings.MAX_FONT_SP)
         persistPrompterSettings()
         notifyStageSettingsChanged()
@@ -353,27 +397,37 @@ object PrompterSession {
     }
 
     fun updateFocusFraction(value: Float) {
+        if (!value.isFinite()) return
         focusFraction = value.coerceIn(StageSettings.MIN_FOCUS, StageSettings.MAX_FOCUS)
         notifyStageSettingsChanged()
     }
 
     fun updateGradientEdgeAlpha(value: Float) {
+        if (!value.isFinite()) return
         gradientEdgeAlpha = value.coerceIn(0f, 1f)
         notifyStageSettingsChanged()
     }
 
     fun updateMarginDp(value: Float) {
+        if (!value.isFinite()) return
         marginDp = value.coerceIn(StageSettings.MIN_MARGIN_DP, StageSettings.MAX_MARGIN_DP)
         notifyStageSettingsChanged()
     }
 
     fun updateLineSpacing(value: Float) {
+        if (!value.isFinite()) return
         lineSpacing = value.coerceIn(StageSettings.MIN_LINE_SPACING, StageSettings.MAX_LINE_SPACING)
         notifyStageSettingsChanged()
     }
 
     fun updateStageFont(value: StageFont) {
         stageFont = value
+        notifyStageSettingsChanged()
+    }
+
+    fun updateStageCustomFont(fileName: String?) {
+        customFontFile = fileName
+        stageFont = if (fileName != null) StageFont.CUSTOM else StageFont.SANS
         notifyStageSettingsChanged()
     }
 
@@ -394,6 +448,18 @@ object PrompterSession {
 
     fun updateBackgroundPreset(value: StageBackground) {
         backgroundPreset = value
+        notifyStageSettingsChanged()
+    }
+
+    fun updateCustomTextColor(value: Int) {
+        customTextArgb = value
+        textColorPreset = StageTextColor.CUSTOM
+        notifyStageSettingsChanged()
+    }
+
+    fun updateCustomBackgroundColor(value: Int) {
+        customBackgroundArgb = value
+        backgroundPreset = StageBackground.CUSTOM
         notifyStageSettingsChanged()
     }
 
@@ -447,7 +513,29 @@ object PrompterSession {
         overlayRunning = running
         if (!running) {
             projectionActive = false
+            overlayAreaAdjusting = false
         }
+    }
+
+    fun applyOverlayArea(area: OverlayArea) {
+        overlayArea = area.sanitized()
+    }
+
+    fun updateOverlayArea(area: OverlayArea) {
+        val sanitized = area.sanitized()
+        if (sanitized == overlayArea) {
+            return
+        }
+        overlayArea = sanitized
+        onOverlayAreaPreviewChanged?.invoke(sanitized)
+    }
+
+    fun persistOverlayArea() {
+        onOverlayAreaChanged?.invoke(overlayArea)
+    }
+
+    fun updateOverlayAreaAdjusting(adjusting: Boolean) {
+        overlayAreaAdjusting = adjusting
     }
 
     fun updateLayout(
@@ -470,24 +558,46 @@ object PrompterSession {
     }
 
     fun seekToProgress(progress: Float) {
+        if (!progress.isFinite()) return
         cancelCountdown()
-        val clamped = progress.coerceIn(0f, 1f)
-        offsetPx = clamped * contentHeightPx
-        isAtEnd = false
+        stopFling()
         lastFrameNanos = 0L
         pendingStartProgress = null
+        isAtEnd = false
+        val target = PrompterMath.offsetForProgress(progress, contentHeightPx).coerceIn(0f, contentHeightPx.coerceAtLeast(0f))
+        seekAnimator?.cancel()
+        val start = offsetPx
+        val distance = abs(target - start)
+        if (distance < 1f) {
+            offsetPx = target
+            return
+        }
+        if (distance > contentHeightPx * 0.5f) {
+            // Large jumps (restore) snap instead of flying across the screen.
+            offsetPx = target
+            return
+        }
+        // Chase the thumb with a short ease so dragging the scrubber feels smooth
+        // instead of stepped; big velocity changes just re-target the same chase.
+        seekAnimator =
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 150L
+                interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+                addUpdateListener { offsetPx = start + (target - start) * animatedFraction }
+                start()
+            }
     }
 
     fun seekBySeconds(seconds: Float) {
         if (contentHeightPx <= 0f) {
             return
         }
-        val totalSeconds = (wordCount / speedWpm.coerceAtLeast(1f)).coerceAtLeast(1f) * 60f
-        val pixelsPerSecond = contentHeightPx / totalSeconds
-        scrollByPixels(pixelsPerSecond * seconds)
+        scrollByPixels(PrompterMath.seekDeltaPixels(contentHeightPx, wordCount, speedWpm, seconds))
     }
 
     fun scrollByPixels(deltaPx: Float) {
+        stopFling()
+        seekAnimator?.cancel()
         cancelCountdown()
         val maxOffset = contentHeightPx.coerceAtLeast(0f)
         offsetPx = (offsetPx + deltaPx).coerceIn(0f, maxOffset)
@@ -496,20 +606,73 @@ object PrompterSession {
         pendingStartProgress = null
     }
 
+    /**
+     * Starts an inertial fling from [flingVelocity] (px per second in screen
+     * coordinates; positive moves the text down, matching the drag direction).
+     * The fling decelerates with a constant deceleration and stops at the
+     * content bounds — the same feel as flinging a list.
+     */
+    fun startFling(flingVelocity: Float) {
+        if (contentHeightPx <= 0f || abs(flingVelocity) < FLING_MIN_START) {
+            this.flingVelocity = 0f
+            flingActive = false
+            return
+        }
+        cancelCountdown()
+        seekAnimator?.cancel()
+        this.flingVelocity = flingVelocity
+        flingActive = true
+        lastFrameNanos = 0L
+        scheduleFrame()
+    }
+
+    fun stopFling() {
+        flingVelocity = 0f
+        flingActive = false
+    }
+
+    private fun advanceFling(deltaSeconds: Float) {
+        if (deltaSeconds <= 0f) {
+            return
+        }
+        val dir = if (flingVelocity >= 0f) 1f else -1f
+        val decel = FLING_DECELERATION * deltaSeconds
+        flingVelocity =
+            if (abs(flingVelocity) <= decel) {
+                0f
+            } else {
+                flingVelocity - dir * decel
+            }
+        if (flingVelocity == 0f) {
+            flingActive = false
+            return
+        }
+        val maxOffset = contentHeightPx.coerceAtLeast(0f)
+        val next = offsetPx - flingVelocity * deltaSeconds
+        offsetPx = next.coerceIn(0f, maxOffset)
+        isAtEnd = maxOffset > 0f && offsetPx >= maxOffset
+        if (offsetPx <= 0f || offsetPx >= maxOffset) {
+            flingVelocity = 0f
+            flingActive = false
+        }
+    }
+
     fun updateAdaptiveContrast(luminance: Float) {
         lastContrastLuminance = luminance
-        val chooseLight =
-            when {
-                luminance < 0.43f -> true
-                luminance > 0.57f -> false
-                else -> return
+        when (PrompterMath.adaptiveTone(luminance)) {
+            AdaptiveTone.LIGHT -> {
+                adaptiveTextColorArgb = WHITE
+                adaptiveOutlineColorArgb = DARK_OUTLINE
             }
-        if (chooseLight) {
-            adaptiveTextColorArgb = WHITE
-            adaptiveOutlineColorArgb = DARK_OUTLINE
-        } else {
-            adaptiveTextColorArgb = BLACK
-            adaptiveOutlineColorArgb = LIGHT_OUTLINE
+
+            AdaptiveTone.DARK -> {
+                adaptiveTextColorArgb = BLACK
+                adaptiveOutlineColorArgb = LIGHT_OUTLINE
+            }
+
+            AdaptiveTone.UNCHANGED -> {
+                // Keep the current colour inside the hysteresis band.
+            }
         }
     }
 
@@ -524,6 +687,7 @@ object PrompterSession {
                     StageTextColor.AMBER -> AMBER
                     StageTextColor.MINT -> MINT
                     StageTextColor.INK -> INK
+                    StageTextColor.CUSTOM -> customTextArgb
                 }
             }
 
@@ -531,25 +695,34 @@ object PrompterSession {
         get() =
             if (adaptiveContrastEnabled && projectionActive) {
                 adaptiveOutlineColorArgb
-            } else if (textColorPreset == StageTextColor.INK) {
+            } else if (textColorPreset == StageTextColor.INK ||
+                (textColorPreset == StageTextColor.CUSTOM && luminance(customTextArgb) < 0.5f)
+            ) {
                 LIGHT_OUTLINE
             } else {
                 DARK_OUTLINE
             }
 
-    val progress: Float
+    /** Background the stage + overlay draw. Custom colour when the preset is CUSTOM. */
+    val effectiveBackgroundArgb: Int
         get() =
-            if (contentHeightPx > 0f) {
-                (offsetPx / contentHeightPx).coerceIn(0f, 1f)
-            } else {
-                0f
-            }
+            if (backgroundPreset == StageBackground.CUSTOM) customBackgroundArgb else backgroundPreset.argb
+
+    fun luminance(color: Int): Float {
+        val r = (color shr 16 and 0xFF) / 255f
+        val g = (color shr 8 and 0xFF) / 255f
+        val b = (color and 0xFF) / 255f
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b
+    }
+
+    val progress: Float
+        get() = PrompterMath.progressFor(offsetPx, contentHeightPx)
 
     val totalSeconds: Int
-        get() = ((wordCount / speedWpm.coerceAtLeast(1f)) * 60f).roundToInt().coerceAtLeast(1)
+        get() = PrompterMath.totalSeconds(wordCount, speedWpm)
 
     val remainingSeconds: Int
-        get() = (totalSeconds * (1f - progress).coerceIn(0f, 1f)).roundToInt().coerceAtLeast(0)
+        get() = PrompterMath.remainingSeconds(totalSeconds, progress)
 
     private fun startCountdown() {
         cancelCountdown()
@@ -582,27 +755,26 @@ object PrompterSession {
         if (!isPlaying || deltaSeconds <= 0f) {
             return
         }
-        val maxOffset = contentHeightPx.coerceAtLeast(0f)
-        if (maxOffset <= 0f) {
+        if (contentHeightPx <= 0f) {
             return
         }
-        val pixelsPerSecond =
-            maxOffset /
-                ((wordCount / speedWpm.coerceAtLeast(1f)).coerceAtLeast(1f) * 60f)
-        val next = offsetPx + pixelsPerSecond * deltaSeconds
-        if (next >= maxOffset) {
-            if (loopEnabled) {
-                offsetPx = 0f
-                isAtEnd = false
-                lastFrameNanos = 0L
-            } else {
-                offsetPx = maxOffset
-                isPlaying = false
-                isAtEnd = true
-                lastFrameNanos = 0L
-            }
-        } else {
-            offsetPx = next
+        val next =
+            PrompterMath.advance(
+                offsetPx = offsetPx,
+                contentHeightPx = contentHeightPx,
+                wordCount = wordCount,
+                speedWpm = speedWpm,
+                deltaSeconds = deltaSeconds,
+                loopEnabled = loopEnabled,
+            )
+        offsetPx = next.offsetPx
+        if (next.isAtEnd) {
+            isPlaying = false
+            isAtEnd = true
+            lastFrameNanos = 0L
+        } else if (next.looped) {
+            isAtEnd = false
+            lastFrameNanos = 0L
         }
     }
 
