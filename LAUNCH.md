@@ -47,7 +47,9 @@ Debug builds always use Google's official test ad units.
 | CI — Android verification | `.github/workflows/android-verify.yml` |
 | CI — Release AAB | `.github/workflows/release.yml` |
 
-CI secrets configured: `ADMOB_APP_ID`, `ADMOB_BANNER`, `ADMOB_INTERSTITIAL`,
+CI runs are manual-only in the private repo to conserve Actions minutes;
+the API matrix was executed on a temporary public mirror (now private, pending
+deletion). CI secrets configured: `ADMOB_APP_ID`, `ADMOB_BANNER`, `ADMOB_INTERSTITIAL`,
 `KEYSTORE_BASE64`, `KEYSTORE_STORE_PASSWORD`, `KEYSTORE_KEY_ALIAS`,
 `KEYSTORE_KEY_PASSWORD`.
 
