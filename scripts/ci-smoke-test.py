@@ -72,6 +72,22 @@ def tap_text(text):
     tap(wait_for(text))
 
 
+def tap_until(text, next_text, attempts=3, timeout=60, label=None):
+    """Tap a control and wait for the next screen, retrying on slow emulators."""
+    for attempt in range(attempts):
+        point = wait_for(text)
+        tap(point)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if find(dump(), next_text):
+                return
+            time.sleep(2)
+        print(f"retry {attempt + 1}: {text!r} did not reach {next_text!r}")
+        time.sleep(2)
+    shot(f"fail-{label or text.replace(' ', '-').lower()}")
+    raise SystemExit(f"timed out waiting for {next_text!r} after tapping {text!r}")
+
+
 def scroll_until(text, timeout=40):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -117,23 +133,20 @@ def main():
     run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
-    wait_for("Present")
+    wait_for("Present", timeout=90)
     shot("01-library")
     print("PASS library")
 
-    tap_text("Present")
-    wait_for("Playback")
+    tap_until("Present", "Playback", label="present")
     shot("02-stage")
     print("PASS stage")
 
-    tap_text("Window")
-    wait_for("Transparent overlay")
+    tap_until("Window", "Transparent overlay", label="window-tab")
     shot("03-window-tab")
     print("PASS window tab")
 
     # Overlay disclosure must appear before the system permission screen.
-    tap_text("Transparent overlay")
-    wait_for("Draw over other apps")
+    tap_until("Transparent overlay", "Draw over other apps", label="overlay-disclosure")
     shot("04-overlay-disclosure")
     tap_text("Not now")
     print("PASS overlay disclosure")
@@ -143,13 +156,9 @@ def main():
     run(*ADB, "shell", "input", "keyevent", "3")
     time.sleep(1)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
-    wait_for("Window")
-    tap_text("Window")
-    wait_for("Transparent overlay")
-    tap_text("Transparent overlay")
-
-    # Adaptive contrast disclosure, then manual colors (no projection needed).
-    wait_for("Screen capture for adaptive contrast")
+    wait_for("Window", timeout=60)
+    tap_until("Window", "Transparent overlay", label="window-tab-2")
+    tap_until("Transparent overlay", "Screen capture for adaptive contrast", label="projection-disclosure")
     shot("05-projection-disclosure")
     tap_text("Use manual colors")
     time.sleep(4)
@@ -174,7 +183,12 @@ def main():
 
     # The bar must be interactive: expand if collapsed and stop the overlay.
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
-    wait_for("Stop overlay")
+    if find(dump(), "Stop overlay") is None:
+        # Some API levels recreate the task; navigate back to the stage.
+        if find(dump(), "Present"):
+            tap_until("Present", "Playback", label="present-2")
+            tap_until("Window", "Transparent overlay", label="window-tab-3")
+    wait_for("Stop overlay", timeout=60)
     shot("07-overlay-live-in-app")
     tap_text("Stop overlay")
     time.sleep(3)
@@ -186,7 +200,7 @@ def main():
     # Settings: privacy policy + ad privacy entry points.
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
-    wait_for("Present")
+    wait_for("Present", timeout=90)
     # Open settings via the gear content description.
     xml = dump()
     gear = None
