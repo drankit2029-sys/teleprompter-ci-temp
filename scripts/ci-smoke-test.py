@@ -112,6 +112,9 @@ def assert_no_crash():
 
 def main():
     run(*ADB, "shell", "settings", "put", "system", "screen_off_timeout", "2147483647")
+    # Pre-grant the notification permission on API 33+ so the system dialog does
+    # not block the scripted overlay flow (the app requests it contextually).
+    run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
     wait_for("Present")
