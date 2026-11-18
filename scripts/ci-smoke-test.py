@@ -57,9 +57,18 @@ def find(xml, text):
 def wait_for(text, timeout=45):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        point = find(dump(), text)
+        xml = dump()
+        point = find(xml, text)
         if point:
             return point
+        # Dismiss system hints that can cover the app (immersive-mode "GOT IT",
+        # notification permission "Allow") before retrying.
+        for hint in ("GOT IT", "Allow"):
+            hint_point = find(xml, hint)
+            if hint_point:
+                tap(hint_point)
+                time.sleep(1)
+                break
         time.sleep(2)
     label = text.replace(" ", "-").lower()
     shot(f"timeout-{label}")
@@ -132,6 +141,8 @@ def assert_no_crash():
 
 def main():
     run(*ADB, "shell", "settings", "put", "system", "screen_off_timeout", "2147483647")
+    # Suppress the API 31+ immersive-mode confirmation that covers the stage.
+    run(*ADB, "shell", "settings", "put", "secure", "immersive_mode_confirmations", "confirmed", check=False)
     # Pre-grant the notification permission on API 33+ so the system dialog does
     # not block the scripted overlay flow (the app requests it contextually).
     run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)

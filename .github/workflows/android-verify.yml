@@ -34,7 +34,7 @@ jobs:
       fail-fast: false
       max-parallel: 5
       matrix:
-        api-level: [31]
+        api-level: [28, 29, 30, 31, 33, 34, 35, 36]
     name: emulator-api-${{ matrix.api-level }}
     steps:
       - uses: actions/checkout@v4
