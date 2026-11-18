@@ -1,0 +1,47 @@
+name: Release AAB
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Decode upload keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+        run: |
+          mkdir -p keystore
+          echo "$KEYSTORE_BASE64" | base64 -d > keystore/teleprompter-upload.jks
+          {
+            echo "storeFile=keystore/teleprompter-upload.jks"
+            echo "storePassword=$KEYSTORE_STORE_PASSWORD"
+            echo "keyAlias=$KEYSTORE_KEY_ALIAS"
+            echo "keyPassword=$KEYSTORE_KEY_PASSWORD"
+          } > keystore.properties
+      - name: Build signed release AAB
+        env:
+          TELEPROMPTER_APP_ID: ${{ secrets.ADMOB_APP_ID }}
+          TELEPROMPTER_BANNER: ${{ secrets.ADMOB_BANNER }}
+          TELEPROMPTER_INTERSTITIAL: ${{ secrets.ADMOB_INTERSTITIAL }}
+        run: ./gradlew :app:bundleBaseRelease --console=plain
+      - name: Verify artifact
+        run: |
+          ls -la app/build/outputs/bundle/baseRelease/
+          unzip -p app/build/outputs/bundle/baseRelease/app-base-release.aab base/manifest/AndroidManifest.xml | strings | grep -E "ca-app-pub" | head -3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teleprompter-v1.0.0-aab
+          path: app/build/outputs/bundle/baseRelease/app-base-release.aab
