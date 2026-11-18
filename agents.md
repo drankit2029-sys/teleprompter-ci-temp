@@ -820,3 +820,13 @@ git switch -c recover-phase-0 checkpoint/phase-0
   cache cleanup; main-thread IO removed from repository init. AAB:
   app/build/outputs/bundle/baseRelease/app-base-release.aab (8.6 MB, signed,
   versionCode 1, versionName 1.0.0, targetSdk 37).
+- 2026-11-18 (final) — GitHub Actions verification PASSED on a 4-core/16GB runner
+  (API 30 pixel_5 emulator, KVM): library, stage, window tab, overlay disclosure,
+  overlay running (bar in lower half), overlay stopped, settings privacy entry
+  points, no crashes. Screenshots uploaded as the emulator-screenshots artifact.
+  Signed release AAB built on the runner from the latest commit:
+  app/build/outputs/bundle/baseRelease/app-base-release.aab (8.6 MB,
+  sha256 c20571133c1487d8563dbf382e9c553f23b344a88b65aba2f10d403310f24777,
+  versionCode 1 / versionName 1.0.0 / targetSdk 37, production AdMob app ID).
+  Play listing assets generated in play-store/ (icon-512, feature-graphic,
+  8 ad-free screenshots). Local PC left idle (no emulator/gradle daemons).
