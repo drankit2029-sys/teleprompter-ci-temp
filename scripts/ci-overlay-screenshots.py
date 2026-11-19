@@ -280,13 +280,18 @@ def main():
     run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "--display", str(DISPLAY_ID), "-W", "-n", ACTIVITY)
-    time.sleep(3)
+    time.sleep(8)
 
     # Gear icon is top-right of the yellow header (icon, not OCR text).
-    tap((int(WIDTH * 0.87), int(HEIGHT * 0.05)))
-    time.sleep(2)
-    start_btn = yellow_button()
+    start_btn = None
+    for _ in range(3):
+        tap((int(WIDTH * 0.87), int(HEIGHT * 0.05)))
+        time.sleep(3)
+        start_btn = yellow_button()
+        if start_btn:
+            break
     if not start_btn:
+        screencap("timeout-settings")
         raise SystemExit(f"Start overlay button not found on {PROFILE}")
     tap(start_btn)
     time.sleep(2)
