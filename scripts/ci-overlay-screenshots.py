@@ -83,13 +83,15 @@ def wait_for(text, timeout=60):
 
 
 def scroll_until(text, timeout=40):
+    swipe_x = int(int(WIDTH) * 0.75) if int(WIDTH) > int(HEIGHT) else int(WIDTH) // 2
+    y0 = int(int(HEIGHT) * 0.70)  # above the bottom ad banner
+    y1 = int(int(HEIGHT) * 0.35)
     deadline = time.time() + timeout
     while time.time() < deadline:
         point = find(dump(), text)
         if point:
             return point
-        run(*ADB, "shell", "input", "swipe", str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.92)),
-            str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.65)), "600")
+        run(*ADB, "shell", "input", "swipe", str(swipe_x), str(y0), str(swipe_x), str(y1), "600")
         time.sleep(2)
     return wait_for(text, timeout=10)
 
@@ -201,7 +203,8 @@ def main():
     wait_for("Playback")
     if find(dump(), "Window") is None:
         # A swipe may have hidden the stage chrome; tap the script to restore it.
-        tap((int(WIDTH) // 2, int(HEIGHT) // 2))
+        stage_x = int(int(WIDTH) * 0.25) if int(WIDTH) > int(HEIGHT) else int(WIDTH) // 2
+        tap((stage_x, int(HEIGHT) // 2))
         wait_for("Window")
     tap(wait_for("Window"))
     tap(scroll_until("Transparent overlay"))
