@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Capture overlay screenshots on a dedicated scrcpy virtual display.
 
-Each invocation targets one (profile, orientation) and creates its own
-`scrcpy --new-display=WxH/DPI` virtual display on the runner's emulator.
+Each invocation targets one (profile, orientation) with its own display.
+Navigation uses OCR of the virtual-display screenshot (uiautomator dump always
+targets the emulator's primary display, not the scrcpy display).
 """
 
 import os
@@ -11,6 +12,7 @@ import subprocess
 import time
 
 from PIL import Image
+import pytesseract
 
 PKG = "com.accessoryTools.teleprompter"
 ACTIVITY = f"{PKG}/com.accessoryTools.teleprompter.MainActivity"
@@ -54,7 +56,6 @@ def start_virtual_display():
     if DISPLAY_ID is None:
         print(open(LOG, errors="ignore").read()[-2000:])
         raise SystemExit("scrcpy virtual display did not start")
-    # screencap -d accepts a display ID on API 30; fall back to the SF id.
     CAPTURE_ID = DISPLAY_ID
     probe = f"{OUT}/_probe.png"
     with open(probe, "wb") as handle:
@@ -64,17 +65,16 @@ def start_virtual_display():
         )
     try:
         with Image.open(probe) as image:
-            if image.size[0] != WIDTH or image.size[1] != HEIGHT:
+            if image.size[:2] != (WIDTH, HEIGHT):
                 raise ValueError("size mismatch")
         os.remove(probe)
     except Exception:
         if os.path.exists(probe):
             os.remove(probe)
         sfid = sfid_for_display()
-        if sfid:
-            CAPTURE_ID = sfid
-        else:
+        if not sfid:
             raise SystemExit("could not capture virtual display")
+        CAPTURE_ID = sfid
     print(f"virtual display id={DISPLAY_ID} capture id={CAPTURE_ID}")
 
 
@@ -118,101 +118,80 @@ def screencap(name):
     print("saved", path, Image.open(path).size)
 
 
-def dump():
-    for _ in range(8):
-        run(*ADB, "shell", "rm", "-f", "/sdcard/ui.xml", check=False)
-        out = run(
-            *ADB, "shell", "uiautomator", "dump", "--compressed", "/sdcard/ui.xml",
-            check=False,
-        )
-        if "ui.xml" in out or "Hierarchy" in out:
-            run(*ADB, "pull", "/sdcard/ui.xml", "/tmp/ui.xml", check=False)
-            try:
-                with open("/tmp/ui.xml", encoding="utf-8") as handle:
-                    return handle.read()
-            except FileNotFoundError:
-                pass
-        time.sleep(2)
-    return ""
-
-
-def find(xml, text):
-    for match in re.finditer(r"<node [^>]*>", xml):
-        node = match.group(0)
-        label = re.search(r'text="([^"]*)"', node)
-        bounds = re.search(r'bounds="([^"]*)"', node)
-        if label and bounds and label.group(1) == text:
-            x1, y1, x2, y2 = map(int, re.findall(r"-?\d+", bounds.group(1)))
-            return ((x1 + x2) // 2, (y1 + y2) // 2)
-    return None
-
-
-def find_desc(xml, text):
-    for match in re.finditer(r"<node [^>]*>", xml):
-        node = match.group(0)
-        desc = re.search(r'content-desc="([^"]*)"', node)
-        bounds = re.search(r'bounds="([^"]*)"', node)
-        if desc and bounds and desc.group(1) == text:
-            x1, y1, x2, y2 = map(int, re.findall(r"-?\d+", bounds.group(1)))
-            return ((x1 + x2) // 2, (y1 + y2) // 2)
-    return None
-
-
-def wait_for(text, timeout=60, desc=False):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        xml = dump()
-        point = find_desc(xml, text) if desc else find(xml, text)
-        if point:
-            return point
-        for hint in ("GOT IT", "Allow"):
-            hp = find(xml, hint)
-            if hp:
-                tap(hp)
-                time.sleep(1)
-                break
-        time.sleep(2)
-    label = f"timeout-{text.replace(' ', '-').lower()}"
+def ocr_find(phrase):
+    """Center of a text phrase in the virtual-display screenshot."""
+    tmp = f"{OUT}/_ocr.png"
+    raw_capture(tmp)
     try:
-        screencap(label)
-        with open(f"{OUT}/{label}.xml", "w", encoding="utf-8") as handle:
-            handle.write(dump())
-    except Exception as error:
-        print("diagnostic failed:", error)
-    raise SystemExit(f"timed out waiting for {text!r} on {PROFILE}")
+        with Image.open(tmp).convert("RGB") as image:
+            data = pytesseract.image_to_data(
+                image, output_type=pytesseract.Output.DICT, config="--psm 11",
+            )
+        lines = {}
+        for i, word in enumerate(data["text"]):
+            word = word.strip()
+            if not word or int(float(data["conf"][i] or -1)) < 25:
+                continue
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            lines.setdefault(key, []).append(
+                (word, int(data["left"][i]), int(data["top"][i]),
+                 int(data["width"][i]), int(data["height"][i]))
+            )
+        target = phrase.lower()
+        for parts in lines.values():
+            text = " ".join(p[0] for p in parts).lower()
+            if target in text or any(p[0].lower() == target for p in parts):
+                xs = [p[1] + p[3] / 2 for p in parts]
+                ys = [p[2] + p[4] / 2 for p in parts]
+                return (int(sum(xs) / len(xs)), int(sum(ys) / len(ys)))
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return None
 
 
 def tap(point):
     adb_input("tap", str(point[0]), str(point[1]))
 
 
-def scroll_until(text, timeout=40):
+def wait_ocr(phrase, timeout=60, scroll=False):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        point = find(dump(), text)
+        point = ocr_find(phrase)
         if point:
             return point
-        x = WIDTH // 2
-        adb_input("swipe", str(x), str(int(HEIGHT * 0.70)),
-                  str(x), str(int(HEIGHT * 0.35)), "600")
+        for hint in ("GOT IT", "Allow"):
+            hp = ocr_find(hint)
+            if hp:
+                tap(hp)
+                time.sleep(1)
+                break
+        if scroll:
+            x = WIDTH // 2
+            adb_input("swipe", str(x), str(int(HEIGHT * 0.75)),
+                      str(x), str(int(HEIGHT * 0.4)), "600")
         time.sleep(2)
-    return wait_for(text, timeout=10)
+    screencap(f"timeout-{phrase.replace(' ', '-').lower()}")
+    raise SystemExit(f"OCR timed out for {phrase!r} on {PROFILE}")
 
 
 def yellow_center():
     tmp = f"{OUT}/_y.png"
     raw_capture(tmp)
-    with Image.open(tmp).convert("RGB") as image:
-        w, h = image.size
-        pts = [
-            (x, y)
-            for y in range(int(h * 0.55), h, 2)
-            for x in range(0, w, 2)
-            if (lambda p: p[0] > 235 and 175 < p[1] < 240 and p[2] < 90)(
-                image.getpixel((x, y))
-            )
-        ]
-    os.remove(tmp)
+    try:
+        with Image.open(tmp).convert("RGB") as image:
+            w, h = image.size
+            pts = [
+                (x, y)
+                for y in range(int(h * 0.55), h, 2)
+                for x in range(0, w, 2)
+                if (lambda p: p[0] > 235 and 175 < p[1] < 240 and p[2] < 90)(
+                    image.getpixel((x, y))
+                )
+            ]
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     if not pts:
         return None
     return (sum(p[0] for p in pts) // len(pts), sum(p[1] for p in pts) // len(pts))
@@ -221,17 +200,20 @@ def yellow_center():
 def magenta_corner():
     tmp = f"{OUT}/_m.png"
     raw_capture(tmp)
-    with Image.open(tmp).convert("RGB") as image:
-        w, h = image.size
-        pts = [
-            (x, y)
-            for y in range(0, h, 3)
-            for x in range(0, w, 3)
-            if (lambda p: p[0] > 200 and p[1] < 90 and p[2] > 200)(
-                image.getpixel((x, y))
-            )
-        ]
-    os.remove(tmp)
+    try:
+        with Image.open(tmp).convert("RGB") as image:
+            w, h = image.size
+            pts = [
+                (x, y)
+                for y in range(0, h, 3)
+                for x in range(0, w, 3)
+                if (lambda p: p[0] > 200 and p[1] < 90 and p[2] > 200)(
+                    image.getpixel((x, y))
+                )
+            ]
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     if not pts:
         return None
     cx, cy = w // 2, h // 2
@@ -268,22 +250,20 @@ def main():
     run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "--display", str(DISPLAY_ID), "-W", "-n", ACTIVITY)
-    # With no focused window on display 0 (launcher stopped), uiautomator dumps
-    # target the app running on the virtual display instead.
-    run(*ADB, "shell", "am", "force-stop", "com.android.launcher3", check=False)
-    run(*ADB, "shell", "am", "force-stop", "com.google.android.launcher", check=False)
-    time.sleep(2)
-    tap(wait_for("Settings", desc=True))
-    tap(scroll_until("Start overlay"))
-    tap(wait_for("Screen capture for adaptive contrast"))
-    tap(wait_for("Use manual colors"))
+    time.sleep(3)
+
+    # Gear icon is top-right of the yellow header (icon, not OCR text).
+    tap((int(WIDTH * 0.87), int(HEIGHT * 0.05)))
+    tap(wait_ocr("Start overlay", timeout=30, scroll=True))
+    tap(wait_ocr("Screen capture for adaptive contrast", timeout=30))
+    tap(wait_ocr("Use manual colors", timeout=30))
     time.sleep(4)
 
     # Wait for the 5s auto-collapse, then capture the collapsed draggable toolbar.
     time.sleep(5)
     screencap(f"overlay-collapsed-{PROFILE}")
 
-    # Expand the bar from the collapsed TP square, then enter resize mode.
+    # Expand the bar via the collapsed TP square, then enter resize mode.
     bounds = control_window()
     if not bounds:
         raise SystemExit(f"control window not found on {PROFILE}")
