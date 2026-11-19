@@ -39,7 +39,7 @@ def start_virtual_display():
     global DISPLAY_ID, CAPTURE_ID
     with open(LOG, "w") as handle:
         subprocess.Popen(
-            ["scrcpy", "--new-display", f"{WIDTH}x{HEIGHT}/{DPI}",
+            ["scrcpy", f"--new-display={WIDTH}x{HEIGHT}/{DPI}",
              "--no-audio", "--window-title", f"TP-{PROFILE}"],
             stdout=handle, stderr=subprocess.STDOUT,
         )
