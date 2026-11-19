@@ -183,17 +183,47 @@ def wait_ocr(phrase, timeout=60, scroll=False):
 
 
 def teal_button():
-    """Center of the filled teal 'Start overlay' button in Settings."""
+    """Center of the widest teal element (the Start overlay button)."""
     tmp = f"{OUT}/_tb.png"
+    raw_capture(tmp)
+    try:
+        with Image.open(tmp).convert("RGB") as image:
+            w, h = image.size
+            mask = [
+                (x, y)
+                for y in range(int(h * 0.12), int(h * 0.90), 3)
+                for x in range(0, w, 3)
+                if (lambda p: p[0] < 90 and 150 < p[1] < 235 and 160 < p[2] < 235)(
+                    image.getpixel((x, y))
+                )
+            ]
+            if not mask:
+                return None
+            rows = {}
+            for x, y in mask:
+                rows[y] = rows.get(y, 0) + 1
+            best_row = max(rows, key=rows.get)
+            band = [p for p in mask if abs(p[1] - best_row) < 45]
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if not band:
+        return None
+    return (sum(p[0] for p in band) // len(band), sum(p[1] for p in band) // len(band))
+
+
+def tp_square():
+    """Center of the collapsed yellow TP square in the lower part of the screen."""
+    tmp = f"{OUT}/_tp.png"
     raw_capture(tmp)
     try:
         with Image.open(tmp).convert("RGB") as image:
             w, h = image.size
             pts = [
                 (x, y)
-                for y in range(int(h * 0.50), int(h * 0.78), 2)
-                for x in range(int(w * 0.05), int(w * 0.60), 2)
-                if (lambda p: p[0] < 90 and 150 < p[1] < 235 and 160 < p[2] < 235)(
+                for y in range(int(h * 0.70), h, 2)
+                for x in range(0, w, 2)
+                if (lambda p: p[0] > 235 and 175 < p[1] < 240 and p[2] < 90)(
                     image.getpixel((x, y))
                 )
             ]
@@ -295,6 +325,10 @@ def control_window():
     return None
 
 
+def control_window_bounds():
+    return control_window()
+
+
 def main():
     start_virtual_display()
     run(*ADB, "shell", "settings", "put", "system", "screen_off_timeout", "2147483647")
@@ -327,11 +361,12 @@ def main():
     screencap(f"overlay-collapsed-{PROFILE}")
 
     # Expand the bar via the collapsed TP square, then enter resize mode.
-    bounds = control_window()
-    if not bounds:
-        raise SystemExit(f"control window not found on {PROFILE}")
-    x, y, w, h = bounds
-    tap((x + w // 2, y + h // 2))
+    square = tp_square() or control_window_bounds()
+    if square:
+        if len(square) == 4:
+            x, y, w, h = square
+            square = (x + w // 2, y + h // 2)
+        tap(square)
     time.sleep(1.5)
     area = yellow_center()
     if area:
