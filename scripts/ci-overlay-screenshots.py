@@ -88,8 +88,8 @@ def scroll_until(text, timeout=40):
         point = find(dump(), text)
         if point:
             return point
-        run(*ADB, "shell", "input", "swipe", str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.8)),
-            str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.4)), "600")
+        run(*ADB, "shell", "input", "swipe", str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.92)),
+            str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.65)), "600")
         time.sleep(2)
     return wait_for(text, timeout=10)
 
@@ -197,8 +197,12 @@ def main():
     run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
-    wait_for("Present")
+    tap(scroll_until("Present"))
     tap_until("Present", "Playback")
+    if find(dump(), "Window") is None:
+        # A swipe may have hidden the stage chrome; tap the script to restore it.
+        tap((int(WIDTH) // 2, int(HEIGHT) // 2))
+        wait_for("Window")
     tap(wait_for("Window"))
     tap(scroll_until("Transparent overlay"))
     tap_until("Transparent overlay", "Screen capture for adaptive contrast")
