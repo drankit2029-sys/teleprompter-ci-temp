@@ -40,7 +40,7 @@ def start_virtual_display():
     with open(LOG, "w") as handle:
         subprocess.Popen(
             ["scrcpy", f"--new-display={WIDTH}x{HEIGHT}/{DPI}",
-             "--no-audio", "--window-title", f"TP-{PROFILE}"],
+             "--no-audio", "--render-driver=software", "--window-title", f"TP-{PROFILE}"],
             stdout=handle, stderr=subprocess.STDOUT,
         )
     deadline = time.time() + 60
