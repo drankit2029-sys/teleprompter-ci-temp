@@ -198,7 +198,7 @@ def main():
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
     tap(scroll_until("Present"))
-    tap_until("Present", "Playback")
+    wait_for("Playback")
     if find(dump(), "Window") is None:
         # A swipe may have hidden the stage chrome; tap the script to restore it.
         tap((int(WIDTH) // 2, int(HEIGHT) // 2))
