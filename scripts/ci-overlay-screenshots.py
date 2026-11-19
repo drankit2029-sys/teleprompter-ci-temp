@@ -261,6 +261,11 @@ def main():
     run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "--display", str(DISPLAY_ID), "-W", "-n", ACTIVITY)
+    # With no focused window on display 0 (launcher stopped), uiautomator dumps
+    # target the app running on the virtual display instead.
+    run(*ADB, "shell", "am", "force-stop", "com.android.launcher3", check=False)
+    run(*ADB, "shell", "am", "force-stop", "com.google.android.launcher", check=False)
+    time.sleep(2)
     tap(wait_for("Settings", desc=True))
     tap(scroll_until("Start overlay"))
     tap(wait_for("Screen capture for adaptive contrast"))
