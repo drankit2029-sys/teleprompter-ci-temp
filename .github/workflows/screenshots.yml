@@ -1,0 +1,70 @@
+name: Overlay screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :app:assembleBaseDebug --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/base/debug/app-base-debug.apk
+
+  capture:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include:
+          - { name: normal-portrait,  width: 1080, height: 2340, dpi: 420 }
+          - { name: normal-landscape, width: 2340, height: 1080, dpi: 420 }
+          - { name: compact-portrait, width: 720,  height: 1280, dpi: 320 }
+          - { name: compact-landscape, width: 1280, height: 720,  dpi: 320 }
+          - { name: 7in-portrait,    width: 1200, height: 1920, dpi: 213 }
+          - { name: 7in-landscape,   width: 1920, height: 1200, dpi: 213 }
+          - { name: 10in-portrait,   width: 1600, height: 2560, dpi: 240 }
+          - { name: 10in-landscape,  width: 2560, height: 1600, dpi: 240 }
+    name: capture-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: actions/download-artifact@v4
+        with: { name: app-debug, path: ci-artifacts }
+      - name: Install Pillow for screenshot analysis
+        run: python3 -m pip install --quiet pillow
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Capture overlay screenshots (${{ matrix.name }})
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: default
+          arch: x86_64
+          profile: pixel_5
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            adb install -r ci-artifacts/app-base-debug.apk
+            PROFILE=${{ matrix.name }} WIDTH=${{ matrix.width }} HEIGHT=${{ matrix.height }} DPI=${{ matrix.dpi }} \
+              python3 scripts/ci-overlay-screenshots.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: overlay-${{ matrix.name }}
+          path: ci-screenshots/
