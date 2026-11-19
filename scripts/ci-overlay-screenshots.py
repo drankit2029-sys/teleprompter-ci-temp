@@ -75,7 +75,23 @@ def wait_for(text, timeout=60):
                 time.sleep(1)
                 break
         time.sleep(2)
+    label = text.replace(" ", "-").lower()
+    screencap(f"timeout-{label}")
+    with open(f"{OUT}/timeout-{label}.xml", "w", encoding="utf-8") as handle:
+        handle.write(dump())
     raise SystemExit(f"timed out waiting for {text!r} on {PROFILE}")
+
+
+def scroll_until(text, timeout=40):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        point = find(dump(), text)
+        if point:
+            return point
+        run(*ADB, "shell", "input", "swipe", str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.8)),
+            str(int(WIDTH) // 2), str(int(int(HEIGHT) * 0.4)), "600")
+        time.sleep(2)
+    return wait_for(text, timeout=10)
 
 
 def tap(point):
@@ -183,7 +199,8 @@ def main():
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
     wait_for("Present")
     tap_until("Present", "Playback")
-    tap_until("Window", "Transparent overlay")
+    tap(wait_for("Window"))
+    tap(scroll_until("Transparent overlay"))
     tap_until("Transparent overlay", "Screen capture for adaptive contrast")
     tap(wait_for("Use manual colors"))
     time.sleep(4)
