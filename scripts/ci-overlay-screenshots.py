@@ -183,33 +183,51 @@ def wait_ocr(phrase, timeout=60, scroll=False):
 
 
 def teal_button():
-    """Center of the widest teal element (the Start overlay button)."""
+    """Center of the filled teal 'Start overlay' button (not sliders/toggle)."""
     tmp = f"{OUT}/_tb.png"
     raw_capture(tmp)
     try:
         with Image.open(tmp).convert("RGB") as image:
             w, h = image.size
-            mask = [
-                (x, y)
-                for y in range(int(h * 0.12), int(h * 0.90), 3)
-                for x in range(0, w, 3)
-                if (lambda p: p[0] < 90 and 150 < p[1] < 235 and 160 < p[2] < 235)(
-                    image.getpixel((x, y))
-                )
-            ]
-            if not mask:
-                return None
-            rows = {}
-            for x, y in mask:
-                rows[y] = rows.get(y, 0) + 1
-            best_row = max(rows, key=rows.get)
-            band = [p for p in mask if abs(p[1] - best_row) < 45]
+            step = 3
+            mw, mh = w // step, h // step
+            mask = set()
+            for my in range(mh // 8, int(mh * 0.92)):
+                for mx in range(mw):
+                    p = image.getpixel((mx * step, my * step))
+                    if p[0] < 90 and 150 < p[1] < 235 and 160 < p[2] < 235:
+                        mask.add((mx, my))
+            seen = set()
+            candidates = []
+            for cell in mask:
+                if cell in seen:
+                    continue
+                stack = [cell]
+                seen.add(cell)
+                comp = []
+                while stack:
+                    c = stack.pop()
+                    comp.append(c)
+                    for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        n = (c[0] + d[0], c[1] + d[1])
+                        if n in mask and n not in seen:
+                            seen.add(n)
+                            stack.append(n)
+                if len(comp) < 80:
+                    continue
+                xs = [c[0] for c in comp]
+                ys = [c[1] for c in comp]
+                bw, bh = max(xs) - min(xs), max(ys) - min(ys)
+                cx, cy = (min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2
+                if bw > 45 and bh > 14 and cx < mw * 0.72:
+                    candidates.append((len(comp), cx * step, cy * step))
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-    if not band:
+    if not candidates:
         return None
-    return (sum(p[0] for p in band) // len(band), sum(p[1] for p in band) // len(band))
+    best = max(candidates, key=lambda c: c[0])
+    return (best[1], best[2])
 
 
 def tp_square():
@@ -355,6 +373,11 @@ def main():
     # Consent sheet: "Use manual colors" is the left button near the lower third.
     tap((int(WIDTH * 0.45), int(HEIGHT * 0.64)))
     time.sleep(4)
+    top = run(*ADB, "shell", "dumpsys", "activity", "activities", check=False)
+    top_line = next((l for l in top.splitlines() if "topResumedActivity" in l), "")
+    if PKG in top_line:
+        screencap("timeout-overlay-not-started")
+        raise SystemExit(f"overlay did not start on {PROFILE}: {top_line.strip()}")
 
     # Wait for the 5s auto-collapse, then capture the collapsed draggable toolbar.
     time.sleep(5)
