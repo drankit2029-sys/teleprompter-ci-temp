@@ -124,13 +124,14 @@ def ocr_find(phrase):
     raw_capture(tmp)
     try:
         with Image.open(tmp).convert("RGB") as image:
+            image = image.resize((image.width * 2, image.height * 2))
             data = pytesseract.image_to_data(
                 image, output_type=pytesseract.Output.DICT, config="--psm 11",
             )
         lines = {}
         for i, word in enumerate(data["text"]):
             word = word.strip()
-            if not word or int(float(data["conf"][i] or -1)) < 25:
+            if not word or int(float(data["conf"][i] or -1)) < 10:
                 continue
             key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
             lines.setdefault(key, []).append(
@@ -143,7 +144,7 @@ def ocr_find(phrase):
             if target in text or any(p[0].lower() == target for p in parts):
                 xs = [p[1] + p[3] / 2 for p in parts]
                 ys = [p[2] + p[4] / 2 for p in parts]
-                return (int(sum(xs) / len(xs)), int(sum(ys) / len(ys)))
+                return (int(sum(xs) / len(xs) / 2), int(sum(ys) / len(ys) / 2))
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -156,6 +157,7 @@ def tap(point):
 
 def wait_ocr(phrase, timeout=60, scroll=False):
     deadline = time.time() + timeout
+    attempt = 0
     while time.time() < deadline:
         point = ocr_find(phrase)
         if point:
@@ -166,10 +168,15 @@ def wait_ocr(phrase, timeout=60, scroll=False):
                 tap(hp)
                 time.sleep(1)
                 break
-        if scroll:
+        if scroll and attempt >= 2:
             x = WIDTH // 2
-            adb_input("swipe", str(x), str(int(HEIGHT * 0.75)),
-                      str(x), str(int(HEIGHT * 0.4)), "600")
+            if attempt % 4 < 4:  # swipe down => scroll toward the top
+                adb_input("swipe", str(x), str(int(HEIGHT * 0.35)),
+                          str(x), str(int(HEIGHT * 0.75)), "600")
+            else:  # swipe up => scroll toward the bottom
+                adb_input("swipe", str(x), str(int(HEIGHT * 0.75)),
+                          str(x), str(int(HEIGHT * 0.35)), "600")
+        attempt += 1
         time.sleep(2)
     screencap(f"timeout-{phrase.replace(' ', '-').lower()}")
     raise SystemExit(f"OCR timed out for {phrase!r} on {PROFILE}")
