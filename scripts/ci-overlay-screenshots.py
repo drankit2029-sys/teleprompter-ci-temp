@@ -172,6 +172,13 @@ def wait_for(text, timeout=60, desc=False):
                 time.sleep(1)
                 break
         time.sleep(2)
+    label = f"timeout-{text.replace(' ', '-').lower()}"
+    try:
+        screencap(label)
+        with open(f"{OUT}/{label}.xml", "w", encoding="utf-8") as handle:
+            handle.write(dump())
+    except Exception as error:
+        print("diagnostic failed:", error)
     raise SystemExit(f"timed out waiting for {text!r} on {PROFILE}")
 
 
