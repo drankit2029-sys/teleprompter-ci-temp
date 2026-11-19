@@ -61,8 +61,7 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             adb install -r ci-artifacts/app-base-debug.apk
-            PROFILE=${{ matrix.name }} WIDTH=${{ matrix.width }} HEIGHT=${{ matrix.height }} DPI=${{ matrix.dpi }} \
-              python3 scripts/ci-overlay-screenshots.py
+            PROFILE=${{ matrix.name }} WIDTH=${{ matrix.width }} HEIGHT=${{ matrix.height }} DPI=${{ matrix.dpi }} python3 scripts/ci-overlay-screenshots.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
