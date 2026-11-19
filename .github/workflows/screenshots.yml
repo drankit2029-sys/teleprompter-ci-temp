@@ -25,11 +25,18 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 20
+      # At most two virtual displays alive at any time.
+      max-parallel: 2
       matrix:
         include:
+          - { name: normal-portrait,  width: 1080, height: 2340, dpi: 420 }
+          - { name: normal-landscape, width: 2340, height: 1080, dpi: 420 }
           - { name: compact-portrait, width: 720,  height: 1280, dpi: 320 }
           - { name: compact-landscape, width: 1280, height: 720,  dpi: 320 }
+          - { name: 7in-portrait,    width: 1200, height: 1920, dpi: 213 }
+          - { name: 7in-landscape,   width: 1920, height: 1200, dpi: 213 }
+          - { name: 10in-portrait,   width: 1600, height: 2560, dpi: 240 }
+          - { name: 10in-landscape,  width: 2560, height: 1600, dpi: 240 }
     name: capture-${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
@@ -37,14 +44,17 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: actions/download-artifact@v4
         with: { name: app-debug, path: ci-artifacts }
-      - name: Install Pillow for screenshot analysis
-        run: python3 -m pip install --quiet pillow
+      - name: Install tools
+        run: |
+          python3 -m pip install --quiet pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq scrcpy
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Capture overlay screenshots (${{ matrix.name }})
+      - name: Capture on scrcpy display (${{ matrix.name }})
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 30
