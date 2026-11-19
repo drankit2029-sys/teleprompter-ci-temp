@@ -96,6 +96,34 @@ def scroll_until(text, timeout=40):
     return wait_for(text, timeout=10)
 
 
+def find_desc(xml, text):
+    for match in re.finditer(r"<node [^>]*>", xml):
+        node = match.group(0)
+        desc = re.search(r'content-desc="([^"]*)"', node)
+        bounds = re.search(r'bounds="([^"]*)"', node)
+        if desc and bounds and desc.group(1) == text:
+            x1, y1, x2, y2 = map(int, re.findall(r"-?\d+", bounds.group(1)))
+            return ((x1 + x2) // 2, (y1 + y2) // 2)
+    return None
+
+
+def wait_for_desc(text, timeout=60):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        xml = dump()
+        point = find_desc(xml, text)
+        if point:
+            return point
+        for hint in ("GOT IT", "Allow"):
+            hp = find(xml, hint)
+            if hp:
+                tap(hp)
+                time.sleep(1)
+                break
+        time.sleep(2)
+    raise SystemExit(f"timed out waiting for desc {text!r} on {PROFILE}")
+
+
 def tap(point):
     run(*ADB, "shell", "input", "tap", str(point[0]), str(point[1]))
 
@@ -199,16 +227,11 @@ def main():
     run(*ADB, "shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
     run(*ADB, "shell", "am", "force-stop", PKG)
     run(*ADB, "shell", "am", "start", "-W", "-n", ACTIVITY)
-    tap(scroll_until("Present"))
-    wait_for("Playback")
-    if find(dump(), "Window") is None:
-        # A swipe may have hidden the stage chrome; tap the script to restore it.
-        stage_x = int(int(WIDTH) * 0.25) if int(WIDTH) > int(HEIGHT) else int(WIDTH) // 2
-        tap((stage_x, int(HEIGHT) // 2))
-        wait_for("Window")
-    tap(wait_for("Window"))
-    tap(scroll_until("Transparent overlay"))
-    tap_until("Transparent overlay", "Screen capture for adaptive contrast")
+    # Start the overlay from Settings: the gear is always visible, unlike the
+    # library card's Present button on very short screens.
+    tap(wait_for_desc("Settings"))
+    tap(scroll_until("Start overlay"))
+    tap(wait_for("Screen capture for adaptive contrast"))
     tap(wait_for("Use manual colors"))
     time.sleep(4)
 
