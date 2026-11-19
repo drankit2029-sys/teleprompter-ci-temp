@@ -182,6 +182,29 @@ def wait_ocr(phrase, timeout=60, scroll=False):
     raise SystemExit(f"OCR timed out for {phrase!r} on {PROFILE}")
 
 
+def teal_button():
+    """Center of the filled teal 'Start overlay' button in Settings."""
+    tmp = f"{OUT}/_tb.png"
+    raw_capture(tmp)
+    try:
+        with Image.open(tmp).convert("RGB") as image:
+            w, h = image.size
+            pts = [
+                (x, y)
+                for y in range(int(h * 0.50), int(h * 0.78), 2)
+                for x in range(int(w * 0.05), int(w * 0.60), 2)
+                if (lambda p: p[0] < 90 and 150 < p[1] < 235 and 160 < p[2] < 235)(
+                    image.getpixel((x, y))
+                )
+            ]
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if not pts:
+        return None
+    return (sum(p[0] for p in pts) // len(pts), sum(p[1] for p in pts) // len(pts))
+
+
 def yellow_button():
     """Center of the filled yellow 'Start overlay' button (header excluded)."""
     tmp = f"{OUT}/_yb.png"
@@ -287,7 +310,7 @@ def main():
     for _ in range(3):
         tap((int(WIDTH * 0.87), int(HEIGHT * 0.05)))
         time.sleep(3)
-        start_btn = yellow_button()
+        start_btn = teal_button()
         if start_btn:
             break
     if not start_btn:
