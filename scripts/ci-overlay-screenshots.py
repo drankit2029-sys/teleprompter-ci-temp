@@ -182,6 +182,29 @@ def wait_ocr(phrase, timeout=60, scroll=False):
     raise SystemExit(f"OCR timed out for {phrase!r} on {PROFILE}")
 
 
+def yellow_button():
+    """Center of the filled yellow 'Start overlay' button (header excluded)."""
+    tmp = f"{OUT}/_yb.png"
+    raw_capture(tmp)
+    try:
+        with Image.open(tmp).convert("RGB") as image:
+            w, h = image.size
+            pts = [
+                (x, y)
+                for y in range(int(h * 0.15), int(h * 0.9), 2)
+                for x in range(0, w, 2)
+                if (lambda p: p[0] > 235 and 175 < p[1] < 240 and p[2] < 90)(
+                    image.getpixel((x, y))
+                )
+            ]
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if not pts:
+        return None
+    return (sum(p[0] for p in pts) // len(pts), sum(p[1] for p in pts) // len(pts))
+
+
 def yellow_center():
     tmp = f"{OUT}/_y.png"
     raw_capture(tmp)
@@ -261,9 +284,14 @@ def main():
 
     # Gear icon is top-right of the yellow header (icon, not OCR text).
     tap((int(WIDTH * 0.87), int(HEIGHT * 0.05)))
-    tap(wait_ocr("Start overlay", timeout=30, scroll=True))
-    tap(wait_ocr("Screen capture for adaptive contrast", timeout=30))
-    tap(wait_ocr("Use manual colors", timeout=30))
+    time.sleep(2)
+    start_btn = yellow_button()
+    if not start_btn:
+        raise SystemExit(f"Start overlay button not found on {PROFILE}")
+    tap(start_btn)
+    time.sleep(2)
+    # Consent sheet: "Use manual colors" is the left button near the lower third.
+    tap((int(WIDTH * 0.45), int(HEIGHT * 0.64)))
     time.sleep(4)
 
     # Wait for the 5s auto-collapse, then capture the collapsed draggable toolbar.
