@@ -29,8 +29,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - { name: 7in-portrait,    width: 1200, height: 1920, dpi: 213 }
-          - { name: 7in-landscape,   width: 1920, height: 1200, dpi: 213 }
           - { name: compact-landscape, width: 1280, height: 720, dpi: 320 }
     name: capture-${{ matrix.name }}
     steps:

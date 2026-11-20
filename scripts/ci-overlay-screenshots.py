@@ -189,10 +189,17 @@ def gear_center():
     try:
         with Image.open(tmp).convert("RGB") as image:
             w, h = image.size
+            if int(WIDTH) > int(HEIGHT):
+                # Landscape: header is in the left pane, gear near its right edge.
+                x0, x1 = int(w * 0.30), int(w * 0.50)
+                y0, y1 = int(h * 0.05), int(h * 0.20)
+            else:
+                x0, x1 = int(w * 0.85), int(w * 0.99)
+                y0, y1 = int(h * 0.025), int(h * 0.07)
             pts = [
                 (x, y)
-                for y in range(int(h * 0.025), int(h * 0.07), 2)
-                for x in range(int(w * 0.85), int(w * 0.99), 2)
+                for y in range(y0, y1, 2)
+                for x in range(x0, x1, 2)
                 if (lambda p: sum(p) < 300)(image.getpixel((x, y)))
             ]
     finally:
