@@ -182,6 +182,27 @@ def wait_ocr(phrase, timeout=60, scroll=False):
     raise SystemExit(f"OCR timed out for {phrase!r} on {PROFILE}")
 
 
+def gear_center():
+    """Center of the gear icon box in the yellow header (top-right)."""
+    tmp = f"{OUT}/_gear.png"
+    raw_capture(tmp)
+    try:
+        with Image.open(tmp).convert("RGB") as image:
+            w, h = image.size
+            pts = [
+                (x, y)
+                for y in range(int(h * 0.02), int(h * 0.11), 2)
+                for x in range(int(w * 0.72), int(w * 0.99), 2)
+                if (lambda p: sum(p) < 300)(image.getpixel((x, y)))
+            ]
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if not pts:
+        return None
+    return (sum(p[0] for p in pts) // len(pts), sum(p[1] for p in pts) // len(pts))
+
+
 def teal_button():
     """Center of the filled teal 'Start overlay' button (not sliders/toggle)."""
     tmp = f"{OUT}/_tb.png"
@@ -358,9 +379,17 @@ def main():
     time.sleep(8)
 
     # Gear icon is top-right of the yellow header (icon, not OCR text).
+    gear = None
+    for _ in range(3):
+        gear = gear_center()
+        if gear:
+            break
+        time.sleep(2)
+    if not gear:
+        raise SystemExit(f"gear icon not found on {PROFILE}")
     start_btn = None
     for _ in range(3):
-        tap((int(WIDTH * 0.87), int(HEIGHT * 0.05)))
+        tap(gear)
         time.sleep(3)
         start_btn = teal_button()
         if start_btn:
