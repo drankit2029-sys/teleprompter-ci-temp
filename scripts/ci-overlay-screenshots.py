@@ -191,8 +191,8 @@ def gear_center():
             w, h = image.size
             pts = [
                 (x, y)
-                for y in range(int(h * 0.02), int(h * 0.11), 2)
-                for x in range(int(w * 0.72), int(w * 0.99), 2)
+                for y in range(int(h * 0.025), int(h * 0.07), 2)
+                for x in range(int(w * 0.85), int(w * 0.99), 2)
                 if (lambda p: sum(p) < 300)(image.getpixel((x, y)))
             ]
     finally:
